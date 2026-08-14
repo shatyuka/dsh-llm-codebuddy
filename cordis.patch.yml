@@ -1,0 +1,26 @@
+# The @shatyuka/dsh-llm-codebuddy bundle patch.
+#
+# Applied as ONE insert after the in-box bundle layers (dsh-base, and for the
+# web profile dsh-web-app), so this row lands on top of them without touching
+# any row they own. Registering a provider needs no change to the `llm` row —
+# this plugin injects the `llm` service and calls
+# `ctx.llm.registerAdapter()` when it activates.
+#
+# Activation is service-availability driven, not row-order driven: the entry
+# below declares `inject: ['llm']` in code, so Cordis mounts it once the `llm`
+# service from dsh-base is up, regardless of where this row sits.
+#
+# Config is omitted deliberately — every field of the plugin's Config is
+# optional and the shipped defaults reach the public CodeBuddy service. There
+# is no credential field by design; sign in through the Web Settings → CodeBuddy
+# page or `npx dsh-codebuddy-login`.
+# To pin a different endpoint or default sizing, override this row by id from
+# your profile's own cordis.patch.yml, for example:
+#
+#   - id: llm-codebuddy
+#     config:
+#       streamIdleTimeoutMs: 120000
+
+- insert:
+    - id: llm-codebuddy
+      name: '@shatyuka/dsh-llm-codebuddy'
