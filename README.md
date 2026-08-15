@@ -19,9 +19,9 @@ Open **Settings → CodeBuddy** in the Web UI and click **Sign in**. The browser
 You can also sign in from the terminal:
 
 ```bash
-npx dsh-codebuddy-login              # sign in
-npx dsh-codebuddy-login --status     # who is signed in, plus the model list
-npx dsh-codebuddy-login --logout     # remove the stored credential
+dsh plugin --profile web dsh-codebuddy-login              # sign in
+dsh plugin --profile web dsh-codebuddy-login --status     # who is signed in, plus the model list
+dsh plugin --profile web dsh-codebuddy-login --logout     # remove the stored credential
 ```
 
 Once signed in, CodeBuddy's models appear in the model picker.
