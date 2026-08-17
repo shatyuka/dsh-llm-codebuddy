@@ -42,6 +42,7 @@ export function buildStorage(token: AuthToken, account: Account): CodeBuddyStora
     account: {
       uid: account.uid,
       nickname: account.nickname,
+      ...account.uin === undefined ? {} : { uin: account.uin },
       ...account.enterpriseId === undefined ? {} : { enterpriseId: account.enterpriseId },
       ...account.enterpriseName === undefined ? {} : { enterpriseName: account.enterpriseName },
       ...account.enterpriseUserName === undefined ? {} : { enterpriseUserName: account.enterpriseUserName },

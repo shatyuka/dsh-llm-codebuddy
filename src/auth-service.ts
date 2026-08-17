@@ -28,6 +28,8 @@ export interface CodeBuddyAuthStatus {
   nickname?: string
   /** Account uid, when available. */
   uid?: string
+  /** Tencent user identity number (e.g. QQ openid), when the account discloses one. */
+  uin?: string
   /** Enterprise/organization id, when the account is an enterprise tenant. */
   enterpriseId?: string
   /** Enterprise display name, when the account is an enterprise tenant. */
@@ -134,6 +136,7 @@ export class CodeBuddyAuthService {
       loggedIn: true,
       nickname: stored.account.nickname,
       uid: stored.account.uid,
+      ...stored.account.uin === undefined ? {} : { uin: stored.account.uin },
       ...stored.account.enterpriseId === undefined ? {} : { enterpriseId: stored.account.enterpriseId },
       ...stored.account.enterpriseName === undefined ? {} : { enterpriseName: stored.account.enterpriseName },
       ...stored.account.enterpriseUserName === undefined ? {} : { enterpriseUserName: stored.account.enterpriseUserName },

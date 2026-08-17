@@ -24,6 +24,7 @@ interface AuthStatus {
   loggedIn: boolean
   nickname?: string
   uid?: string
+  uin?: string
   enterpriseId?: string
   enterpriseName?: string
   enterpriseUserName?: string
@@ -191,17 +192,18 @@ function CodeBuddySection({ rpc, t }: {
 
   return h('div', { style: s.section },
     h('h2', { style: s.title }, 'CodeBuddy'),
-    !signedIn ? h('p', { style: s.desc }, t('desc')) : null,
+    !signedIn ? h('p', { style: s.desc }, t('intro')) : null,
     error !== undefined ? h('p', { style: s.error }, error) : null,
     signedIn
       ? h('div', { style: s.status },
-          h(StatusRow, { label: t('account'), value: status?.nickname ?? '—' }),
+          h(StatusRow, { label: t('nickname'), value: status?.nickname ?? '—' }),
           status?.uid !== undefined ? h(StatusRow, { label: t('uid'), value: status.uid }) : null,
+          status?.uin !== undefined ? h(StatusRow, { label: t('uin'), value: status.uin }) : null,
           status?.enterpriseName !== undefined
-            ? h(StatusRow, { label: t('organization'), value: status.enterpriseName })
+            ? h(StatusRow, { label: t('enterprise'), value: status.enterpriseName })
             : null,
           status?.enterpriseId !== undefined
-            ? h(StatusRow, { label: t('organizationId'), value: status.enterpriseId })
+            ? h(StatusRow, { label: t('enterpriseId'), value: status.enterpriseId })
             : null,
           status?.enterpriseUserName !== undefined
             ? h(StatusRow, { label: t('enterpriseUser'), value: status.enterpriseUserName })
@@ -240,7 +242,7 @@ const NS = 'settings.codebuddy'
 const DICTS = {
   zh: {
     'nav': 'CodeBuddy',
-    'desc': '使用腾讯 CodeBuddy 账号登录。',
+    'intro': '使用腾讯 CodeBuddy 账号登录。',
     'loading': '加载中…',
     'notSignedIn': '未登录。',
     'waiting': '等待浏览器登录完成…',
@@ -248,16 +250,17 @@ const DICTS = {
     'signingIn': '登录中…',
     'signOut': '退出登录',
     'timeout': '登录超时，请重试。',
-    'account': '账号',
+    'nickname': '昵称',
     'uid': 'UID',
-    'organization': '公司',
-    'organizationId': '公司 ID',
+    'uin': 'UIN',
+    'enterprise': '企业',
+    'enterpriseId': '企业 ID',
     'enterpriseUser': '企业用户名',
     'department': '部门',
   },
   en: {
     'nav': 'CodeBuddy',
-    'desc': 'Sign in with your Tencent CodeBuddy account.',
+    'intro': 'Sign in with your Tencent CodeBuddy account.',
     'loading': 'Loading…',
     'notSignedIn': 'Not signed in.',
     'waiting': 'Waiting for the browser sign-in to complete…',
@@ -265,10 +268,11 @@ const DICTS = {
     'signingIn': 'Signing in…',
     'signOut': 'Sign out',
     'timeout': 'Sign-in timed out. Please try again.',
-    'account': 'Account',
+    'nickname': 'Nickname',
     'uid': 'UID',
-    'organization': 'Organization',
-    'organizationId': 'Organization ID',
+    'uin': 'UIN',
+    'enterprise': 'Enterprise',
+    'enterpriseId': 'Enterprise ID',
     'enterpriseUser': 'Enterprise user',
     'department': 'Department',
   },

@@ -30,6 +30,8 @@ export interface CodeBuddyStorage {
   account: {
     uid: string
     nickname: string
+    /** Tencent user identity number (e.g. QQ openid), when the account discloses one. */
+    uin?: string
     enterpriseId?: string
     /** Enterprise display name, when the account is an enterprise tenant. */
     enterpriseName?: string
