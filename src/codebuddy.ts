@@ -154,7 +154,32 @@ export async function getLoginAccount(
   if (body.code !== 0 || body.data === undefined) {
     throw new Error(`CodeBuddy login account request failed: ${body.code} - ${body.msg}`)
   }
-  return body.data
+  return normalizeAccount(body.data)
+}
+
+/**
+ * Normalize an account so an empty-string field reads as absent.
+ *
+ * CodeBuddy's account reply emits empty strings (not omissions) for fields a
+ * tenant does not disclose — e.g. an enterprise account carries `uin: ""`. The
+ * whole downstream (storage, auth status, the settings UI) treats only
+ * `undefined` as "not present", so an empty string would render an empty row.
+ * Trimming once here covers every consumer without each re-checking.
+ * @param account - the raw account from the wire.
+ * @returns the account with empty optional string fields dropped.
+ */
+function normalizeAccount(account: Account): Account {
+  const pick = (value: string | undefined): string | undefined =>
+    value === undefined || value.length === 0 ? undefined : value
+  return {
+    uid: account.uid,
+    nickname: account.nickname,
+    ...pick(account.uin) === undefined ? {} : { uin: account.uin },
+    ...pick(account.enterpriseId) === undefined ? {} : { enterpriseId: account.enterpriseId },
+    ...pick(account.enterpriseName) === undefined ? {} : { enterpriseName: account.enterpriseName },
+    ...pick(account.enterpriseUserName) === undefined ? {} : { enterpriseUserName: account.enterpriseUserName },
+    ...pick(account.departmentFullName) === undefined ? {} : { departmentFullName: account.departmentFullName },
+  }
 }
 
 /**

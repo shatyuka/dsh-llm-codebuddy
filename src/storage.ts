@@ -101,10 +101,40 @@ export async function loadStorage(): Promise<CodeBuddyStorage | undefined> {
     const parsed = JSON.parse(raw) as CodeBuddyStorage | null
     if (parsed?.auth?.accessToken === undefined) return undefined
     if (parsed.account?.uid === undefined) return undefined
-    return parsed
+    // Self-heal storage written before empty-string normalization: an account
+    // field that is an empty string reads as absent so the settings UI does not
+    // render an empty row. A re-login rewrites the file, but this keeps an
+    // existing credential usable without one.
+    return trimEmptyAccountFields(parsed)
   } catch {
     return undefined
   }
+}
+
+/**
+ * Drop account string fields that are empty strings, treating them as absent.
+ *
+ * Older credentials written before {@link normalizeAccount} can carry
+ * `uin: ""` (and other empty optional strings) from the wire; this trims them
+ * so every downstream consumer's `=== undefined` check holds without each
+ * needing its own empty-string guard.
+ * @param storage - the parsed credential.
+ * @returns the credential with empty optional account fields removed.
+ */
+function trimEmptyAccountFields(storage: CodeBuddyStorage): CodeBuddyStorage {
+  const a = storage.account
+  const pick = (v: string | undefined): string | undefined =>
+    v === undefined || v.length === 0 ? undefined : v
+  const account: CodeBuddyStorage['account'] = {
+    uid: a.uid,
+    nickname: a.nickname,
+    ...pick(a.uin) === undefined ? {} : { uin: a.uin },
+    ...pick(a.enterpriseId) === undefined ? {} : { enterpriseId: a.enterpriseId },
+    ...pick(a.enterpriseName) === undefined ? {} : { enterpriseName: a.enterpriseName },
+    ...pick(a.enterpriseUserName) === undefined ? {} : { enterpriseUserName: a.enterpriseUserName },
+    ...pick(a.departmentFullName) === undefined ? {} : { departmentFullName: a.departmentFullName },
+  }
+  return { auth: storage.auth, account }
 }
 
 /**
