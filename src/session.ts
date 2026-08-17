@@ -13,6 +13,8 @@
 
 import { getConfig, refreshAccessToken } from './codebuddy.js'
 import type { CodeBuddyIdentity } from './codebuddy.js'
+import { fetchUsage } from './usage.js'
+import type { UsageSnapshot } from './usage.js'
 import { loadStorage, saveStorage } from './storage.js'
 import type { CodeBuddyStorage } from './storage.js'
 import type { CodeBuddyModel } from './types.js'
@@ -216,5 +218,31 @@ export class CodeBuddySession {
       this.logger?.warn(error)
       return []
     }
+  }
+
+  /**
+   * The CodeBuddy usage/quota snapshot, or `undefined` when it cannot be read.
+   *
+   * Usage is an advisory read on a settings surface, so a meter outage must
+   * degrade to "nothing to show" rather than propagate: a {@link NotLoggedInError}
+   * surfaces as a signed-out state, and every other failure (transport, parse,
+   * expired refresh) resolves to `undefined` after a warning. The identity is
+   * resolved through the same single-flight refresh as a chat request, so a
+   * concurrent meter read never spends the refresh token twice.
+   * @param signal - optional cancellation.
+   * @returns the snapshot, or `undefined` when nothing is stored or the meter
+   *   plane was unreachable.
+   */
+  async usage(signal?: AbortSignal): Promise<UsageSnapshot | undefined> {
+    let identity: CodeBuddyIdentity
+    try {
+      identity = await this.identity()
+    } catch (error) {
+      if (error instanceof NotLoggedInError) return undefined
+      this.logger?.warn('dsh-codebuddy: could not resolve identity for usage read')
+      this.logger?.warn(error)
+      return undefined
+    }
+    return fetchUsage(identity, signal)
   }
 }

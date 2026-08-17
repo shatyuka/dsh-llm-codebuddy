@@ -28,12 +28,20 @@ import { CodeBuddySession } from './session.js'
 export { CodeBuddyAdapter, httpErrorCode } from './adapter.js'
 export type { CodeBuddyAdapterOptions, CodeBuddyConnectionOptions } from './adapter.js'
 export { CodeBuddyAuthService, CODEBUDDY_AUTH_CHANNEL } from './auth-service.js'
-export type { CodeBuddyAuthStatus, CodeBuddyLoginStart, CodeBuddyLoginPoll } from './auth-service.js'
+export type {
+  CodeBuddyAuthStatus,
+  CodeBuddyLoginStart,
+  CodeBuddyLoginPoll,
+  CodeBuddyUsageResult,
+  CodeBuddyUsageWindow,
+} from './auth-service.js'
 export { CodeBuddySession, NotLoggedInError } from './session.js'
 export { login } from './login.js'
 export type { LoginHooks, LoginResult } from './login.js'
 export { clearStorage, getStoragePath, loadStorage, saveStorage } from './storage.js'
 export type { CodeBuddyStorage } from './storage.js'
+export { fetchUsage, fetchPersonalUsage, fetchEnterpriseUsage, parseUsage } from './usage.js'
+export type { UsageSnapshot, UsageWindow } from './usage.js'
 export * from './constants.js'
 export { hasDisclosedCapacity } from './types.js'
 export type * from './types.js'

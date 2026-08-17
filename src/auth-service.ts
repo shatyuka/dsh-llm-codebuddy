@@ -16,6 +16,7 @@ import { buildStorage } from './login.js'
 import type { CodeBuddySession } from './session.js'
 import { clearStorage, loadStorage, saveStorage } from './storage.js'
 import type { CodeBuddyStorage } from './storage.js'
+import type { UsageSnapshot, UsageWindow } from './usage.js'
 
 /** The RPC channel the client calls the auth service on. */
 export const CODEBUDDY_AUTH_CHANNEL = '/codebuddy'
@@ -56,6 +57,31 @@ export interface CodeBuddyLoginPoll {
   nickname?: string
 }
 
+/**
+ * One metering window shipped to the client, a plain-data projection of
+ * {@link UsageWindow} with optional fields made safe to omit.
+ */
+export interface CodeBuddyUsageWindow {
+  name: string
+  used?: number
+  limit?: number
+  usedPercent?: number
+  resetsAt?: string
+}
+
+/** The shape `usage` returns to the client. */
+export interface CodeBuddyUsageResult {
+  /** Whether a usable credential is stored; false means no usage to show. */
+  loggedIn: boolean
+  /** One entry per metering window; empty when the plane answered nothing usable. */
+  windows: CodeBuddyUsageWindow[]
+  /**
+   * The first window, surfaced for a single-bar affordance; `undefined` when
+   * the plane reported no windows.
+   */
+  primary?: CodeBuddyUsageWindow
+}
+
 /** One in-flight browser-login handshake, keyed by its own state. */
 interface PendingLogin {
   state: string
@@ -74,6 +100,22 @@ function ok<T>(value: T): RpcOk<T> {
 
 function err(code: string, message: string): RpcErr {
   return { ok: false, error: { code, message, details: {} } }
+}
+
+/**
+ * Project one owned-data {@link UsageWindow} into the RPC-safe shape the
+ * client receives, widening optional fields only when present.
+ * @param window - the metering window.
+ * @returns the client-safe projection.
+ */
+function projectWindow(window: UsageWindow): CodeBuddyUsageWindow {
+  return {
+    name: window.name,
+    ...window.used === undefined ? {} : { used: window.used },
+    ...window.limit === undefined ? {} : { limit: window.limit },
+    ...window.usedPercent === undefined ? {} : { usedPercent: window.usedPercent },
+    ...window.resetsAt === undefined ? {} : { resetsAt: window.resetsAt },
+  }
 }
 
 /**
@@ -119,6 +161,7 @@ export class CodeBuddyAuthService {
         return ok(await this.pollLogin(state))
       }
       case 'logout': return ok(await this.logout())
+      case 'usage': return ok(await this.usage())
       default: return err('not-found', `unknown auth endpoint: ${endpoint}`)
     }
   }
@@ -190,6 +233,25 @@ export class CodeBuddyAuthService {
     // Drop the in-memory cache so the next request re-reads disk (finds
     // nothing) instead of serving the now-revoked token.
     this.session?.invalidate()
+  }
+
+  /**
+   * Read the CodeBuddy usage snapshot for the settings surface.
+   *
+   * Delegates to the session, which resolves a refreshed identity before the
+   * meter read and never throws on a meter outage. A signed-out account is
+   * reported as `loggedIn: false` with empty windows so the client can hide
+   * the affordance rather than render a broken bar.
+   * @returns the usage projection, or a signed-out shape when nothing is stored.
+   */
+  async usage(): Promise<CodeBuddyUsageResult> {
+    const snapshot: UsageSnapshot | undefined = await this.session?.usage()
+    if (snapshot === undefined) {
+      return { loggedIn: false, windows: [] }
+    }
+    const windows = snapshot.windows.map(projectWindow)
+    const primary = snapshot.primary !== undefined ? projectWindow(snapshot.primary) : undefined
+    return { loggedIn: true, windows, ...primary === undefined ? {} : { primary } }
   }
 
   /**
