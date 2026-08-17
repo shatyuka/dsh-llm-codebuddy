@@ -1,6 +1,6 @@
 {
   "name": "@shatyuka/dsh-llm-codebuddy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Tencent CodeBuddy plugin for DeepSeek Harness (dsh).",
   "author": "shatyuka",
   "license": "MIT",
