@@ -40,6 +40,21 @@ const CUSTOM_LIMIT_KEY = 'dsh-codebuddy:custom-limit'
 const DANGER_PCT_KEY = 'dsh-codebuddy:danger-pct'
 const usagePrefListeners = new Set<() => void>()
 
+/**
+ * Login-state change notifier: lets the settings page tell the sidebar usage
+ * indicator to re-read after a sign-in or sign-out completes, since the two are
+ * independent components and the indicator's polling effect would otherwise
+ * wait for its next 60s tick.
+ */
+const loginChangeListeners = new Set<() => void>()
+function emitLoginChange(): void {
+  for (const listener of loginChangeListeners) listener()
+}
+function subscribeLoginChange(listener: () => void): () => void {
+  loginChangeListeners.add(listener)
+  return () => { loginChangeListeners.delete(listener) }
+}
+
 /** Read the persisted show/hide preference; defaults to shown when unset/unreadable. */
 function getUsagePref(): boolean {
   try {
@@ -312,6 +327,15 @@ function UsageIndicator({ rpc, t, wide }: {
     setDangerPctState(getDangerPct())
   }), [])
 
+  // Re-read usage immediately when a sign-in or sign-out completes, rather
+  // than waiting for the next 60s polling tick.
+  useEffect(() => subscribeLoginChange(() => {
+    void rpc.call<UsageResult>(AUTH_CHANNEL, 'usage', {}).then((result) => {
+      if (result.ok && result.value.loggedIn) setUsage(result.value)
+      else setUsage(undefined)
+    }).catch(() => { /* a re-read failure just keeps the last snapshot */ })
+  }), [rpc])
+
   useEffect(() => {
     if (!showUsage) return
     let stopped = false
@@ -482,6 +506,7 @@ function CodeBuddySection({ rpc, t }: {
       if (result.ok && result.value.done) {
         setLoginState(undefined)
         await refresh()
+        emitLoginChange()
         return
       }
       if (Date.now() - startedAt >= POLL_DEADLINE_MS) {
@@ -513,6 +538,7 @@ function CodeBuddySection({ rpc, t }: {
     const result = await rpc.call<void>(AUTH_CHANNEL, 'logout', {})
     if (result.ok) {
       setStatus({ loggedIn: false })
+      emitLoginChange()
     } else {
       setError(describeError(result))
       setPhase('error')
