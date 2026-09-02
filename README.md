@@ -9,7 +9,7 @@ Sign in through your browser — **no API key required** — and use CodeBuddy's
 Add the plugin to a dsh profile — the `web` profile backs the Web UI:
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile web add @shatyuka/dsh-llm-codebuddy
+dsh plugin --profile web add @shatyuka/dsh-llm-codebuddy
 ```
 
 ## Sign in
@@ -19,9 +19,9 @@ Open **Settings → CodeBuddy** in the Web UI and click **Sign in**. The browser
 You can also sign in from the terminal:
 
 ```bash
-npx dsh-codebuddy-login              # sign in
-npx dsh-codebuddy-login --status     # who is signed in, plus the model list
-npx dsh-codebuddy-login --logout     # remove the stored credential
+dsh plugin --profile web exec dsh-codebuddy-login              # sign in
+dsh plugin --profile web exec dsh-codebuddy-login --status     # who is signed in, plus the model list
+dsh plugin --profile web exec dsh-codebuddy-login --logout     # remove the stored credential
 ```
 
 Once signed in, CodeBuddy's models appear in the model picker.
