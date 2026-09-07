@@ -10,7 +10,7 @@
  * @module dsh-llm-codebuddy/translate
  */
 
-import { CallId, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { DONE } from './sse.js'
 import type { WireChunk, WireUsage } from './types.js'
@@ -153,7 +153,7 @@ function closeBlock(block: OpenBlock, tools: readonly ToolDefinition[]): Content
     case 'tool-call':
       return {
         type: 'tool-call',
-        id: CallId(block.callId ?? ''),
+        id: ToolCallId(block.callId ?? ''),
         name: block.name ?? '',
         arguments: normalizeToolArguments(block.name ?? '', block.text, tools),
       }
@@ -267,7 +267,7 @@ export async function* translate(
         yield {
           type: 'tool-call-delta',
           index: block.index,
-          id: CallId(block.callId ?? ''),
+          id: ToolCallId(block.callId ?? ''),
           ...block.name === undefined ? {} : { name: block.name },
           argumentsDelta: fragment,
         }
