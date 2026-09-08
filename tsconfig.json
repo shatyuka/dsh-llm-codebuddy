@@ -19,5 +19,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/client.ts"]
+  "exclude": ["src/client.ts", "src/model-select.ts", "src/client-types.ts"]
 }

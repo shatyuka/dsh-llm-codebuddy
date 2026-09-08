@@ -21,6 +21,8 @@ import {
   Input,
   IconChevronDownOutline14,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBuddyModelSelect, MODEL_SELECT_CSS } from './model-select.js'
+import type { ModelSelectT } from './model-select.js'
 
 /** The RPC channel the host auth service listens on (mirror of the host constant). */
 const AUTH_CHANNEL = '/codebuddy'
@@ -785,7 +787,23 @@ const DICTS = {
 /** A bound translate function, passed to the section through `inject`. */
 type Translate = (key: string, params?: Record<string, string>) => string
 
-export const inject = ['slots', 'locale', 'connection'] as const
+/**
+ * Module-level service declarations. Beyond this plugin's own seats, the
+ * model-selector shadow declares the ModelDirectoryResolver's own dependency
+ * closure: the service forwards method calls with the CALLER's context as
+ * receiver, so `directoryFor` reads `sessions` / `remote` / `remote.session`
+ * through this plugin's inject declaration (mirroring the official
+ * ui-model-selection plugin's list).
+ */
+export const inject = [
+  'slots',
+  'locale',
+  'connection',
+  'modelDirectories',
+  'sessions',
+  'remote',
+  'remote.session',
+] as const
 
 /**
  * Scoped CSS for the CodeBuddy settings rows.
@@ -819,10 +837,24 @@ function injectPrefCss(): void {
   document.head.appendChild(tag)
 }
 
+/** The CodeBuddy model-catalog reply (mirror of the host projection shape). */
+interface ModelsReply {
+  loggedIn: boolean
+  models: {
+    id: string
+    name: string
+    credits?: string
+    tags?: string[]
+    descriptionZh?: string
+    descriptionEn?: string
+  }[]
+}
+
 /** Register the CodeBuddy section once the `settings.section` slot is declared. */
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, DICTS), 'dsh-llm-codebuddy: settings copy')
   injectPrefCss()
+  injectModelSelectCss()
 
   const t = ctx.locale.bind(NS)
   const rpc = ctx.connection.rpc as ConnectionRpc
@@ -848,4 +880,80 @@ export function apply(ctx: Context): void {
     locale: NS,
     inject: injected,
   }, UsageIndicator))
+
+  // The CodeBuddy-flavoured composer model seat, shadowing
+  // `conversation.input.model` (single-occupant, owned by ui-model-selection's
+  // ModelSelect) at a lower priority value. Selection state stays shared: the
+  // injected face resolves the SAME per-session ModelDirectory the official
+  // seat and the /model popup read, so picking here updates both. Enriched
+  // rows (tags, credit multipliers, tooltips) come from this plugin's own
+  // RPC channel.
+  ctx.inject(['slots', 'modelDirectories', 'sessions', 'remote', 'remote.session'], (scope) => {
+    const models = scope.modelDirectories as {
+      directoryFor: (sessionId: string) => {
+        store: never
+        load: () => Promise<unknown>
+        select: (selection: { provider: string, model: string, reasoningEffort?: string }) => Promise<boolean>
+      }
+    }
+    const sessions = scope.sessions as {
+      subagentAddress: (sessionId: string) => unknown
+    }
+    const enrichedRpc = {
+      models: async () => {
+        const result = await rpc.call<ModelsReply>(AUTH_CHANNEL, 'models', {})
+        return result.ok && result.value.loggedIn ? result.value.models : undefined
+      },
+    }
+    // Copy comes from the official `model` namespace: ui-model-selection
+    // registers its dictionaries and this plugin declares it as a dependency,
+    // so the binding exists by the time the seat renders. The bound `t` keeps
+    // the shell's own wording (and any future key changes) for free.
+    const modelT = ctx.locale.bind('model') as ModelSelectT
+    scope.slots.inject('conversation.input.model', () => scope.slots.register({
+      name: 'conversation.input.model',
+      // Shadowing a single slot requires a lower priority value than the
+      // shipped ModelSelect's default 0 (lowest renders).
+      priority: -1,
+      inject: (sessionId: string) => {
+        const directory = models.directoryFor(sessionId)
+        return {
+          available: sessions.subagentAddress(sessionId) === undefined,
+          directory: directory.store,
+          load: () => { directory.load().catch(() => {}) },
+          select: (selection: { provider: string, model: string, reasoningEffort?: string }) =>
+            directory.select(selection).then(() => true, () => false),
+        }
+      },
+    }, (props: never) => CodeBuddyModelSelect({
+      ...props,
+      rpc: enrichedRpc,
+      t: modelT,
+      zh: localeActiveZh(ctx),
+    })))
+  })
+}
+
+/**
+ * Whether the active dsh locale is Chinese. The locale service exposes its
+ * snapshot through the declared module-level inject; any read failure falls
+ * back to zh (the CodeBuddy catalog's own default language).
+ */
+function localeActiveZh(ctx: { locale?: { getSnapshot?: () => { active: string } } }): boolean {
+  try {
+    return ctx.locale?.getSnapshot?.()?.active !== 'en'
+  } catch {
+    return true
+  }
+}
+
+/** Inject the model seat's stylesheet once per document. */
+function injectModelSelectCss(): void {
+  if (typeof document === 'undefined') return
+  if (document.querySelector('style[data-plugin-css="@shatyuka/dsh-llm-codebuddy/model-select.module.css"]') !== null) return
+  const tag = document.createElement('style')
+  tag.dataset.plugin = '@shatyuka/dsh-llm-codebuddy'
+  tag.dataset.pluginCss = '@shatyuka/dsh-llm-codebuddy/model-select.module.css'
+  tag.textContent = MODEL_SELECT_CSS
+  document.head.appendChild(tag)
 }

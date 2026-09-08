@@ -16,6 +16,8 @@ import { buildStorage } from './login.js'
 import type { CodeBuddySession } from './session.js'
 import { clearStorage, loadStorage, saveStorage } from './storage.js'
 import type { CodeBuddyStorage } from './storage.js'
+import { hasDisclosedCapacity } from './types.js'
+import type { CodeBuddyModel } from './types.js'
 import type { UsageSnapshot, UsageWindow } from './usage.js'
 
 /** The RPC channel the client calls the auth service on. */
@@ -82,6 +84,32 @@ export interface CodeBuddyUsageResult {
   primary?: CodeBuddyUsageWindow
 }
 
+/**
+ * One catalog entry shipped to the client for the model selector, a plain-data
+ * projection of {@link CodeBuddyModel} with optional fields made safe to omit.
+ * The selector reads these richer facts through this plugin's own channel.
+ */
+export interface CodeBuddyModelEntry {
+  id: string
+  name: string
+  /** Credit multiplier label ("x0.79"), when disclosed. */
+  credits?: string
+  /** Opaque tags and `badge:<label>:#<RRGGBB>` colored badges, when disclosed. */
+  tags?: string[]
+  /** Chinese description, when disclosed. */
+  descriptionZh?: string
+  /** English description, when disclosed. */
+  descriptionEn?: string
+}
+
+/** The shape `models` returns to the client. */
+export interface CodeBuddyModelsResult {
+  /** Whether a usable credential is stored; false means no catalog to show. */
+  loggedIn: boolean
+  /** Catalog entries in service order; chat-capable models only. */
+  models: CodeBuddyModelEntry[]
+}
+
 /** One in-flight browser-login handshake, keyed by its own state. */
 interface PendingLogin {
   state: string
@@ -115,6 +143,22 @@ function projectWindow(window: UsageWindow): CodeBuddyUsageWindow {
     ...window.limit === undefined ? {} : { limit: window.limit },
     ...window.usedPercent === undefined ? {} : { usedPercent: window.usedPercent },
     ...window.resetsAt === undefined ? {} : { resetsAt: window.resetsAt },
+  }
+}
+
+/**
+ * Project one catalog model into the RPC-safe shape the client receives.
+ * `undefined` optionals are widened only when present, so the client can test
+ * for absence with a single `!== undefined`.
+ */
+function projectModel(model: CodeBuddyModel): CodeBuddyModelEntry {
+  return {
+    id: model.id,
+    name: model.name,
+    ...model.credits === undefined ? {} : { credits: model.credits },
+    ...model.tags === undefined || model.tags.length === 0 ? {} : { tags: model.tags },
+    ...model.descriptionZh === undefined ? {} : { descriptionZh: model.descriptionZh },
+    ...model.descriptionEn === undefined ? {} : { descriptionEn: model.descriptionEn },
   }
 }
 
@@ -162,6 +206,7 @@ export class CodeBuddyAuthService {
       }
       case 'logout': return ok(await this.logout())
       case 'usage': return ok(await this.usage())
+      case 'models': return ok(await this.models())
       default: return err('not-found', `unknown auth endpoint: ${endpoint}`)
     }
   }
@@ -252,6 +297,23 @@ export class CodeBuddyAuthService {
     const windows = snapshot.windows.map(projectWindow)
     const primary = snapshot.primary !== undefined ? projectWindow(snapshot.primary) : undefined
     return { loggedIn: true, windows, ...primary === undefined ? {} : { primary } }
+  }
+
+  /**
+   * Read the CodeBuddy model catalog with its display facts (credits, tags,
+   * locale descriptions) for the model selector.
+   *
+   * Reuses the session's cached catalog (the same 5-minute TTL the adapter
+   * reads through), so an open selector costs no extra config request. Only
+   * models with disclosed capacities are shipped — the same offerability rule
+   * `listModels` applies, so the client's enriched rows align with the rows
+   * the harness catalog already renders.
+   * @returns the enriched catalog, or a signed-out shape when nothing is stored.
+   */
+  async models(): Promise<CodeBuddyModelsResult> {
+    if (this.session === undefined) return { loggedIn: false, models: [] }
+    const catalog = await this.session.modelsOrEmpty()
+    return { loggedIn: true, models: catalog.filter(hasDisclosedCapacity).map(projectModel) }
   }
 
   /**

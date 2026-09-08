@@ -85,15 +85,19 @@ export interface CodeBuddyReasoning {
 }
 
 /**
- * One model as CodeBuddy describes it. This is the non-OpenAI catalog shape:
- * capability flags and sizes are disclosed here, which an OpenAI `GET /models`
- * listing would not report.
+ * One model as CodeBuddy describes it. This is the CodeBuddy catalog shape,
+ * disclosing capability flags and sizes alongside the OpenAI fields.
  */
 export interface CodeBuddyModel {
   id: string
   name: string
   /** Credit/quota label CodeBuddy shows beside the model name. */
   credits?: string
+  /** Opaque tags ("craft") and `badge:<label>:#<RRGGBB>` colored badges. */
+  tags?: string[]
+  /** Locale-specific model description, when disclosed. */
+  descriptionZh?: string
+  descriptionEn?: string
   /** Combined request/response context capacity. */
   maxAllowedSize?: number
   maxOutputTokens?: number

@@ -32,6 +32,8 @@ export type {
   CodeBuddyAuthStatus,
   CodeBuddyLoginStart,
   CodeBuddyLoginPoll,
+  CodeBuddyModelEntry,
+  CodeBuddyModelsResult,
   CodeBuddyUsageResult,
   CodeBuddyUsageWindow,
 } from './auth-service.js'
