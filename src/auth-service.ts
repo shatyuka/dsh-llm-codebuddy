@@ -16,8 +16,8 @@ import { buildStorage } from './login.js'
 import type { CodeBuddySession } from './session.js'
 import { clearStorage, loadStorage, saveStorage } from './storage.js'
 import type { CodeBuddyStorage } from './storage.js'
-import { hasDisclosedCapacity } from './types.js'
-import type { CodeBuddyModel } from './types.js'
+import { hasDisclosedCapacity, isPromotionActive } from './types.js'
+import type { CodeBuddyModel, CodeBuddyModelPromotion } from './types.js'
 import type { UsageSnapshot, UsageWindow } from './usage.js'
 
 /** The RPC channel the client calls the auth service on. */
@@ -100,6 +100,26 @@ export interface CodeBuddyModelEntry {
   descriptionZh?: string
   /** English description, when disclosed. */
   descriptionEn?: string
+  /**
+   * The currently active campaign on this model, when one runs: a colored
+   * badge for the row plus locale hover text for the tooltip.
+   */
+  promotion?: CodeBuddyPromotionView
+}
+
+/**
+ * The client-facing shape of one active model campaign: only the display
+ * facts (badge color/label, locale hover texts); scheduling and priority are
+ * resolved host-side.
+ */
+export interface CodeBuddyPromotionView {
+  /** Hex color the badge pill renders in. */
+  color: string
+  label: string
+  /** Chinese hover text, when disclosed. */
+  textZh?: string
+  /** English hover text, when disclosed. */
+  textEn?: string
 }
 
 /** The shape `models` returns to the client. */
@@ -151,7 +171,7 @@ function projectWindow(window: UsageWindow): CodeBuddyUsageWindow {
  * `undefined` optionals are widened only when present, so the client can test
  * for absence with a single `!== undefined`.
  */
-function projectModel(model: CodeBuddyModel): CodeBuddyModelEntry {
+function projectModel(model: CodeBuddyModel, promotion: CodeBuddyPromotionView | undefined): CodeBuddyModelEntry {
   return {
     id: model.id,
     name: model.name,
@@ -159,7 +179,34 @@ function projectModel(model: CodeBuddyModel): CodeBuddyModelEntry {
     ...model.tags === undefined || model.tags.length === 0 ? {} : { tags: model.tags },
     ...model.descriptionZh === undefined ? {} : { descriptionZh: model.descriptionZh },
     ...model.descriptionEn === undefined ? {} : { descriptionEn: model.descriptionEn },
+    ...promotion === undefined ? {} : { promotion },
   }
+}
+
+/**
+ * The active campaign for one model, when one runs.
+ *
+ * Among the campaigns whose `modelIds` cover the model and whose schedule is
+ * currently active, the highest `priority` wins — the CodeBuddy IDE's own
+ * selection rule. Only the display facts (badge color/label, hover texts)
+ * cross the wire; scheduling stays host-side.
+ * @param promotions - the campaigns from the config read.
+ * @param modelId - the model to resolve for.
+ * @returns the winning campaign's display facts, or undefined.
+ */
+function promotionFor(promotions: readonly CodeBuddyModelPromotion[], modelId: string): CodeBuddyPromotionView | undefined {
+  let winner: { priority: number, view: CodeBuddyPromotionView } | undefined
+  for (const promotion of promotions) {
+    if (promotion.modelIds === undefined || !promotion.modelIds.includes(modelId)) continue
+    if (!isPromotionActive(promotion)) continue
+    const { color, label } = promotion.badge ?? {}
+    if (color === undefined || label === undefined) continue
+    const priority = promotion.priority ?? 0
+    if (winner !== undefined && winner.priority >= priority) continue
+    const { textZh, textEn } = promotion.hover ?? {}
+    winner = { priority, view: { color, label, ...textZh === undefined ? {} : { textZh }, ...textEn === undefined ? {} : { textEn } } }
+  }
+  return winner?.view
 }
 
 /**
@@ -312,8 +359,12 @@ export class CodeBuddyAuthService {
    */
   async models(): Promise<CodeBuddyModelsResult> {
     if (this.session === undefined) return { loggedIn: false, models: [] }
-    const catalog = await this.session.modelsOrEmpty()
-    return { loggedIn: true, models: catalog.filter(hasDisclosedCapacity).map(projectModel) }
+    const { models, promotions } = await this.session.catalogDataOrEmpty()
+    return {
+      loggedIn: true,
+      models: models.filter(hasDisclosedCapacity).map(model =>
+        projectModel(model, promotionFor(promotions, model.id))),
+    }
   }
 
   /**

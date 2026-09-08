@@ -34,6 +34,7 @@ export type {
   CodeBuddyLoginPoll,
   CodeBuddyModelEntry,
   CodeBuddyModelsResult,
+  CodeBuddyPromotionView,
   CodeBuddyUsageResult,
   CodeBuddyUsageWindow,
 } from './auth-service.js'

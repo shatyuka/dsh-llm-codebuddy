@@ -110,6 +110,46 @@ export interface CodeBuddyModel {
 
 export interface CodeBuddyConfig {
   models: CodeBuddyModel[]
+  /** Scheduled campaigns that attach a badge and hover text to models. */
+  modelPromotions?: CodeBuddyModelPromotion[]
+}
+
+/**
+ * One scheduled campaign from the CodeBuddy config: a colored badge plus hover
+ * text attached to every model in {@link modelIds} while its schedule is
+ * active.
+ */
+export interface CodeBuddyModelPromotion {
+  id: string
+  /** Whether the campaign is currently switched on service-side. */
+  enabled?: boolean
+  /** Higher wins when several campaigns are active on one model. */
+  priority?: number
+  modelIds?: string[]
+  badge?: {
+    /** Hex color the badge pill renders in. */
+    color?: string
+    label?: string
+    /**
+     * When the badge is shown: "activeOnly" (default) only while the schedule
+     * is active; "always" on every schedule state.
+     */
+    display?: 'activeOnly' | 'always'
+  }
+  hover?: {
+    textZh?: string
+    textEn?: string
+  }
+  schedule?: {
+    /** IANA timezone the daily windows are evaluated in. */
+    timezone?: string
+    /** ISO-8601 instant the campaign starts at. */
+    validFrom?: string
+    /** ISO-8601 instant the campaign ends at. */
+    validUntil?: string
+    /** "HH:mm" windows, inclusive start and exclusive end. */
+    daily?: { start: string, end: string }[]
+  }
 }
 
 /**
@@ -127,6 +167,89 @@ export interface CodeBuddyConfig {
 export function hasDisclosedCapacity(model: CodeBuddyModel): boolean {
   return model.maxAllowedSize !== undefined && model.maxAllowedSize > 0
     && model.maxOutputTokens !== undefined && model.maxOutputTokens > 0
+}
+
+/**
+ * Minutes-past-midnight of one "HH:mm" window edge, or undefined when the
+ * value is malformed. Hours run 0–23 and minutes 0–59, matching the CodeBuddy
+ * IDE's own parser.
+ */
+function timeToMinutes(value: string): number | undefined {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value)
+  const hours = match === null ? undefined : Number.parseInt(match[1] ?? '', 10)
+  const minutes = match === null ? undefined : Number.parseInt(match[2] ?? '', 10)
+  if (hours === undefined || Number.isNaN(hours) || minutes === undefined || Number.isNaN(minutes)) return undefined
+  if (hours > 23 || minutes > 59) return undefined
+  return 60 * hours + minutes
+}
+
+/**
+ * Whether `now` (minutes past midnight) is inside one `[start, end)` window.
+ * A zero-length window covers the whole day, and a window whose end is earlier
+ * than its start wraps past midnight.
+ */
+function inDailyWindow(now: number, start: number, end: number): boolean {
+  if (start === end) return true
+  if (end > start) return now >= start && now < end
+  return now >= start || now < end
+}
+
+/**
+ * Minutes past midnight right now in `timezone` (IANA), falling back to the
+ * local clock when the timezone is unknown to `Intl`.
+ */
+function nowMinutesIn(timezone: string | undefined): number {
+  let text: string
+  try {
+    // `hourCycle: 'h23'` keeps midnight at "00:00" — plain `hour12: false`
+    // renders "24:00" on some ICU builds, which would read as minute 1440.
+    text = new Intl.DateTimeFormat('en-US', {
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      ...(timezone === undefined ? {} : { timeZone: timezone }),
+    }).format(new Date())
+  } catch {
+    text = ''
+  }
+  const match = /^(\d{2}):(\d{2})$/.exec(text)
+  if (match === null) {
+    const local = new Date()
+    return 60 * local.getHours() + local.getMinutes()
+  }
+  return 60 * Number.parseInt(match[1] ?? '0', 10) + Number.parseInt(match[2] ?? '0', 10)
+}
+
+/**
+ * Whether one campaign's schedule currently covers the moment, mirroring the
+ * CodeBuddy IDE's own evaluation: a disabled campaign never runs; a missing
+ * schedule always does; `validFrom`/`validUntil` bound the whole campaign by
+ * absolute instant, and `daily` windows are `[start, end)` ranges in the
+ * schedule's timezone (a malformed window edge drops that window).
+ * @param promotion - one campaign entry.
+ * @param now - the instant to test against (defaults to the current time).
+ * @returns true when the campaign is active.
+ */
+export function isPromotionActive(promotion: CodeBuddyModelPromotion, now: number = Date.now()): boolean {
+  if (promotion.enabled === false) return false
+  const schedule = promotion.schedule
+  if (schedule === undefined) return true
+  if (schedule.validFrom !== undefined) {
+    const from = Date.parse(schedule.validFrom)
+    if (!Number.isNaN(from) && now < from) return false
+  }
+  if (schedule.validUntil !== undefined) {
+    const until = Date.parse(schedule.validUntil)
+    if (!Number.isNaN(until) && now >= until) return false
+  }
+  if (schedule.daily !== undefined && schedule.daily.length > 0) {
+    const nowMinutes = nowMinutesIn(schedule.timezone)
+    const inSomeWindow = schedule.daily.some((window) => {
+      const start = timeToMinutes(window.start)
+      const end = timeToMinutes(window.end)
+      return start !== undefined && end !== undefined && inDailyWindow(nowMinutes, start, end)
+    })
+    if (!inSomeWindow) return false
+  }
+  return true
 }
 
 export interface ConfigResponse extends ResponseBase {

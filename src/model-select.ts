@@ -38,6 +38,11 @@ export interface EnrichedModel {
   descriptionZh?: string
   /** English description, when CodeBuddy disclosed one. */
   descriptionEn?: string
+  /**
+   * The currently active campaign on this model, when one runs: a colored
+   * badge pill for the row plus locale hover text for the tooltip.
+   */
+  promotion?: { color: string, label: string, textZh?: string, textEn?: string }
 }
 
 /** The enriched catalog the seat resolves before first render of a group. */
@@ -150,26 +155,38 @@ const tooltip = (props: { side: 'top' | 'right' | 'bottom', delayMs: number, lab
 
 /**
  * The hover bubble content for one model row: name + id on the first line
- * (id dimmer, after the name), the badge tags on the second, and the locale
- * description below.
+ * (id dimmer, after the name), the badge tags and campaign badge on the
+ * second, the locale description, and the campaign hover text below a
+ * separator.
  */
 function modelTooltipContent(model: { id: string, name: string, description?: string }, enriched: EnrichedModel | undefined, zh: boolean): ReactElement {
   const badges = (enriched?.tags ?? []).map(parseTag).filter((tag): tag is DisplayTag => tag !== undefined)
+  const promotion = enriched?.promotion
   // CodeBuddy's own locale descriptions first, then the harness catalog
   // description — every row, any provider, gets a tooltip description.
   const description = descriptionOf(enriched, zh) ?? model.description
+  // Campaign hover text follows the same locale order as descriptions.
+  const promotionText = promotion === undefined ? undefined
+    : zh ? promotion.textZh ?? promotion.textEn : promotion.textEn ?? promotion.textZh
   return h('div', { className: 'cbms-tip' },
     h('div', { className: 'cbms-tipNameRow' },
       h('span', { className: 'cbms-tipName' }, model.name),
       h('span', { className: 'cbms-tipId' }, model.id),
     ),
-    badges.length > 0 ? h('div', { className: 'cbms-tipTags' },
+    badges.length > 0 || promotion !== undefined ? h('div', { className: 'cbms-tipTags' },
       badges.map((badge, i) => h('span', {
         key: i, className: 'cbms-tag', style: { color: badge.color, borderColor: badge.color },
       }, badge.label)),
+      promotion !== undefined ? h('span', {
+        key: 'promotion', className: 'cbms-tag',
+        style: { color: promotion.color, borderColor: promotion.color },
+      }, promotion.label) : null,
     ) : null,
     description !== undefined && description.length > 0
       ? h('div', { className: 'cbms-tipDesc' }, description)
+      : null,
+    promotionText !== undefined && promotionText.length > 0
+      ? h('div', { className: 'cbms-tipPromo' }, promotionText)
       : null,
   )
 }
@@ -387,6 +404,7 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
               const extra = enriched.get(model.id)
               const credits = creditsOf(extra)
               const badges = (extra?.tags ?? []).map(parseTag).filter((tag): tag is DisplayTag => tag !== undefined)
+              const promotion = extra?.promotion
               return tooltip({ label: modelTooltipContent(model, extra, zh), side: 'top', delayMs: 300 },
                 h('button', {
                   key: model.id,
@@ -404,6 +422,11 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
                       key: badge.label, className: 'cbms-tag',
                       style: { color: badge.color, borderColor: badge.color },
                     }, badge.label)),
+                    // The campaign badge rides after the catalog badges.
+                    promotion !== undefined ? h('span', {
+                      key: 'promotion', className: 'cbms-tag',
+                      style: { color: promotion.color, borderColor: promotion.color },
+                    }, promotion.label) : null,
                   ),
                   // The selection check comes before the credits, so an
                   // unselected row's multiplier sits flush right.
@@ -484,6 +507,7 @@ export const MODEL_SELECT_CSS = `
 .cbms-tipNameRow{align-items:baseline;gap:8px;min-width:0;display:flex;white-space:nowrap;overflow:hidden}
 .cbms-tipName{font-weight:500;text-overflow:ellipsis;flex:0 1 auto;overflow:hidden}
 .cbms-tipId{opacity:.65;font-size:12px;text-overflow:ellipsis;flex:0 1 auto;overflow:hidden}
-.cbms-tipTags{flex-wrap:wrap;gap:4px;display:flex}
-.cbms-tipDesc{opacity:.85;font-size:12px;line-height:18px}
+.cbms-tipTags{flex-wrap:wrap;gap:4px;display:flex;max-width:280px}
+.cbms-tipDesc{opacity:.85;font-size:12px;line-height:18px;max-width:280px}
+.cbms-tipPromo{opacity:.85;font-size:12px;line-height:18px;border-top:1px solid color-mix(in srgb, currentColor 25%, transparent);padding-top:6px;max-width:280px}
 `

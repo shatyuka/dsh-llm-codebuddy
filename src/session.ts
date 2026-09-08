@@ -17,7 +17,7 @@ import { fetchUsage } from './usage.js'
 import type { UsageSnapshot } from './usage.js'
 import { loadStorage, saveStorage } from './storage.js'
 import type { CodeBuddyStorage } from './storage.js'
-import type { CodeBuddyModel } from './types.js'
+import type { CodeBuddyModel, CodeBuddyModelPromotion } from './types.js'
 
 /** Refresh this long before the recorded expiry rather than exactly at it. */
 const REFRESH_SKEW_MS = 60_000
@@ -48,8 +48,8 @@ export interface SessionLogger {
 export class CodeBuddySession {
   private storage: CodeBuddyStorage | undefined
   private refreshing: Promise<CodeBuddyIdentity> | undefined
-  private catalog: { models: readonly CodeBuddyModel[], readAt: number } | undefined
-  private catalogRead: Promise<readonly CodeBuddyModel[]> | undefined
+  private catalog: { models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[], readAt: number } | undefined
+  private catalogRead: Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> | undefined
 
   constructor(private readonly logger?: SessionLogger) {}
 
@@ -182,9 +182,19 @@ export class CodeBuddySession {
    * @returns the catalog models in service order.
    */
   async models(signal?: AbortSignal): Promise<readonly CodeBuddyModel[]> {
+    return (await this.catalogData(signal)).models
+  }
+
+  /**
+   * The catalog plus its scheduled campaigns, both cached together under the
+   * same TTL and single-flight as the model list.
+   * @param signal - optional cancellation for the underlying read.
+   * @returns the models and the campaigns in service order.
+   */
+  async catalogData(signal?: AbortSignal): Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> {
     const cached = this.catalog
     if (cached !== undefined && Date.now() - cached.readAt < CATALOG_TTL_MS) {
-      return cached.models
+      return cached
     }
     this.catalogRead ??= this.readModels(signal).finally(() => {
       this.catalogRead = undefined
@@ -192,12 +202,13 @@ export class CodeBuddySession {
     return this.catalogRead
   }
 
-  private async readModels(signal?: AbortSignal): Promise<readonly CodeBuddyModel[]> {
+  private async readModels(signal?: AbortSignal): Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> {
     const identity = await this.identity()
     const config = await getConfig(identity, signal)
     const models = config.models.filter(model => typeof model.id === 'string' && model.id.length > 0)
-    this.catalog = { models, readAt: Date.now() }
-    return models
+    const promotions = config.modelPromotions ?? []
+    this.catalog = { models, promotions, readAt: Date.now() }
+    return { models, promotions }
   }
 
   /**
@@ -217,6 +228,23 @@ export class CodeBuddySession {
       this.logger?.warn('dsh-codebuddy: could not read the model catalog')
       this.logger?.warn(error)
       return []
+    }
+  }
+
+  /**
+   * The catalog and campaigns, or empty lists when they cannot be read — the
+   * advisory-read twin of {@link modelsOrEmpty}.
+   * @param signal - optional cancellation.
+   * @returns the models and campaigns, or empty lists.
+   */
+  async catalogDataOrEmpty(signal?: AbortSignal): Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> {
+    try {
+      return await this.catalogData(signal)
+    } catch (error) {
+      if (error instanceof NotLoggedInError) return { models: [], promotions: [] }
+      this.logger?.warn('dsh-codebuddy: could not read the model catalog')
+      this.logger?.warn(error)
+      return { models: [], promotions: [] }
     }
   }
 
