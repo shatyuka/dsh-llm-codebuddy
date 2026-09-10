@@ -54,7 +54,7 @@
     }
   },
   "scripts": {
-    "build": "npm run build:host && npm run build:client",
+    "build": "npm run build:host && npm run build:client && chmod +x lib/cli/login.js",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "node build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
