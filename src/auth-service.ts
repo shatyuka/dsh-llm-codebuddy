@@ -222,8 +222,8 @@ export class CodeBuddyAuthService {
   private readonly pending = new Map<string, PendingLogin>()
 
   constructor(ctx: Context, private readonly session?: CodeBuddySession) {
-    ctx.inject(['connection'], (connectionCtx) => {
-      const connection = connectionCtx.get('connection') as {
+    ctx.inject(['connection'], () => {
+      const root = ctx.root as Context & { connection: {
         rpc: {
           handle: (
             channel: string,
@@ -231,8 +231,9 @@ export class CodeBuddyAuthService {
             options: { authority: string },
           ) => () => void
         }
-      }
-      connectionCtx.effect(() => connection.rpc.handle(
+      } }
+      const connection = root.connection
+      ctx.effect(() => connection.rpc.handle(
         CODEBUDDY_AUTH_CHANNEL,
         (endpoint, payload, signal) => this.dispatch(endpoint, payload, signal),
         { authority: 'loopback' },
