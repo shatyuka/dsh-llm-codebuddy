@@ -7,6 +7,13 @@
  * whether that handshake has completed. `status` and `logout` are the
  * read/clear pair the settings page drives the rest of the time.
  *
+ * The channel is registered through `ctx.connection.rpc.handle` when the host
+ * allows it; on dsh 0.1.5-rc.1 that path throws (see the constructor), so an
+ * equivalent prefix route is registered on `ctx.webServer` directly, reusing
+ * the connection service's public trust fence. Both carry the same
+ * `client-request`/`server-response` JSON envelopes, so the client half needs
+ * no changes.
+ *
  * @module dsh-llm-codebuddy/auth-service
  */
 
@@ -210,6 +217,48 @@ function promotionFor(promotions: readonly CodeBuddyModelPromotion[], modelId: s
 }
 
 /**
+ * The face this plugin needs off the host `connection` service.
+ *
+ * `rpc.handle` is the preferred registration; `requestRejection` backs the
+ * fallback route this plugin registers itself on hosts where `rpc.handle`
+ * cannot run (see the constructor).
+ */
+interface ConnectionService {
+  rpc: {
+    handle: (
+      channel: string,
+      handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>,
+      options?: { authority?: string },
+    ) => () => void
+  }
+  /** The Host/Origin + browser-authentication fence every RPC request passes. */
+  requestRejection: (request: { headers: Record<string, unknown> }) => number | undefined
+}
+
+/** The face this plugin needs off the host `webServer` service. */
+interface WebServerService {
+  register: (route: {
+    kind: 'prefix'
+    path: string
+    handler: (req: NodeIncomingMessage, res: NodeServerResponse) => void | Promise<void>
+  }) => () => void
+}
+
+/** Minimal node:http shapes the fallback route handler uses. */
+interface NodeIncomingMessage {
+  method?: string
+  url?: string
+  headers: Record<string, unknown>
+  socket: { destroyed?: boolean, errored?: boolean }
+  [Symbol.asyncIterator](): AsyncIterableIterator<string | Buffer>
+}
+
+interface NodeServerResponse {
+  writeHead(status: number, headers?: Record<string, unknown>): void
+  end(data?: string): void
+}
+
+/**
  * The CodeBuddy auth RPC service.
  *
  * A handshake is started by `startLogin`, polled to completion by `pollLogin`,
@@ -222,22 +271,122 @@ export class CodeBuddyAuthService {
   private readonly pending = new Map<string, PendingLogin>()
 
   constructor(ctx: Context, private readonly session?: CodeBuddySession) {
-    ctx.inject(['connection'], (connectionCtx) => {
-      const connection = connectionCtx.get('connection') as {
-        rpc: {
-          handle: (
-            channel: string,
-            handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>,
-            options: { authority: string },
-          ) => () => void
-        }
+    ctx.inject(['connection', 'webServer'], (scopeCtx) => {
+      const connection = scopeCtx.get('connection') as ConnectionService
+      try {
+        // Preferred: the connection service's own channel registry, which
+        // routes through its fetch bridge and owns the transport end to end.
+        scopeCtx.effect(() => connection.rpc.handle(
+          CODEBUDDY_AUTH_CHANNEL,
+          (endpoint, payload, signal) => this.dispatch(endpoint, payload, signal),
+          { authority: 'loopback' },
+        ), 'dsh-llm-codebuddy: auth RPC channel')
+        return
+      } catch {
+        // dsh 0.1.5-rc.1 regression: `rpc.handle` reads `webServer` through
+        // the connection service's OWN fiber context, which does not declare
+        // it, and cordis's strict service access rejects the read — the throw
+        // escapes `handle()` before anything is registered. Fall back to
+        // registering an equivalent prefix route on `webServer` from THIS
+        // scope, reusing the service's public `requestRejection` fence so the
+        // Host/Origin check and browser-session authentication stay intact.
       }
-      connectionCtx.effect(() => connection.rpc.handle(
-        CODEBUDDY_AUTH_CHANNEL,
-        (endpoint, payload, signal) => this.dispatch(endpoint, payload, signal),
-        { authority: 'loopback' },
-      ), 'dsh-llm-codebuddy: auth RPC channel')
+      const webServer = scopeCtx.get('webServer') as WebServerService
+      scopeCtx.effect(() => webServer.register({
+        kind: 'prefix',
+        path: CODEBUDDY_AUTH_CHANNEL,
+        handler: (req, res) => this.handleFallbackRequest(connection, req, res),
+      }), 'dsh-llm-codebuddy: auth RPC channel (fallback route)')
     })
+  }
+
+  /**
+   * Serve one fallback-route RPC request.
+   *
+   * Mirrors the connection service's own HTTP adapter: the same trust fence,
+   * the same `client-request`/`server-response` JSON envelopes, the same
+   * 404/405/415-shaped answers for a non-RPC probe.
+   * @param connection - the host connection service (for the trust fence).
+   * @param req - the incoming node:http request.
+   * @param res - the response to write.
+   */
+  private async handleFallbackRequest(
+    connection: ConnectionService,
+    req: NodeIncomingMessage,
+    res: NodeServerResponse,
+  ): Promise<void> {
+    const rejection = connection.requestRejection(req)
+    if (rejection !== undefined) {
+      res.writeHead(rejection)
+      res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+      return
+    }
+    const pathname = new URL(req.url ?? '/', 'http://dsh.internal').pathname
+    const endpoint = pathname.startsWith(`${CODEBUDDY_AUTH_CHANNEL}/`)
+      ? pathname.slice(CODEBUDDY_AUTH_CHANNEL.length + 1)
+      : undefined
+    if (req.method !== 'POST' || endpoint === undefined || endpoint.includes('/')) {
+      res.writeHead(404)
+      res.end('not found')
+      return
+    }
+    const contentType = typeof req.headers['content-type'] === 'string'
+      ? req.headers['content-type'].split(';', 1)[0]?.trim().toLowerCase()
+      : undefined
+    if (contentType !== 'application/json') {
+      res.writeHead(415)
+      res.end('content type must be application/json')
+      return
+    }
+    let body: string
+    try {
+      const chunks: Buffer[] = []
+      for await (const chunk of req) chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
+      body = Buffer.concat(chunks).toString('utf8')
+    } catch {
+      res.writeHead(400)
+      res.end('failed to read request body')
+      return
+    }
+    let envelope: { rpcId?: unknown, method?: unknown, payload?: unknown }
+    try {
+      envelope = JSON.parse(body) as typeof envelope
+    } catch {
+      res.writeHead(400)
+      res.end('body is not JSON')
+      return
+    }
+    if (envelope.method !== endpoint) {
+      this.writeResponse(res, envelope.rpcId, {
+        ok: false,
+        error: {
+          code: 'gateway/bad-request',
+          message: `method ${JSON.stringify(String(envelope.method))} does not match endpoint ${JSON.stringify(endpoint)}`,
+          details: { issues: [] },
+        },
+      })
+      return
+    }
+    const rpcId = typeof envelope.rpcId === 'string' ? envelope.rpcId : 'invalid-request'
+    let result: RpcOk<unknown> | RpcErr
+    try {
+      result = await this.dispatch(endpoint, envelope.payload, new AbortController().signal)
+    } catch (error) {
+      res.writeHead(500)
+      res.end(`handler failure: ${String(error)}`)
+      return
+    }
+    this.writeResponse(res, rpcId, result)
+  }
+
+  /** Write one `server-response` envelope. */
+  private writeResponse(res: NodeServerResponse, rpcId: unknown, result: RpcOk<unknown> | RpcErr): void {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({
+      type: 'server-response',
+      rpcId,
+      result,
+    }))
   }
 
   /** Route one RPC endpoint to its handler. */
