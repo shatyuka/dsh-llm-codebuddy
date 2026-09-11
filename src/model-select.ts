@@ -122,13 +122,19 @@ function descriptionOf(enriched: EnrichedModel | undefined, zh: boolean): string
 }
 
 /**
- * Fetch the enriched CodeBuddy catalog, refreshed on every menu open.
+ * Fetch the enriched CodeBuddy catalog, refreshed on every menu open and
+ * whenever the harness catalog behind the open menu changes.
  *
- * The host caches the underlying config read (5-minute TTL), so an open that
- * lands inside the cache window is cheap; refreshing on every open keeps a
- * long-lived page from pinning stale tags/credits.
+ * Each open asks the host, which bypasses its own config-cache TTL (subject to
+ * a short floor) so a server-side add or delete is reflected rather than
+ * pinning stale tags/credits for up to five minutes. `catalogKey` is the set of
+ * group/model ids currently rendered: a Host-side add or delete republishes the
+ * harness catalog, which changes this key and refetches the enrichment in the
+ * same breath — without it, an already-open menu would gain a new row with no
+ * enrichment (bare name plus the credit-multiplier description) until the user
+ * closed and reopened it.
  */
-function useEnrichedCatalog(rpc: EnrichedCatalogRpc, open: boolean): Map<string, EnrichedModel> {
+function useEnrichedCatalog(rpc: EnrichedCatalogRpc, open: boolean, catalogKey: string): Map<string, EnrichedModel> {
   const [entries, setEntries] = useState<Map<string, EnrichedModel>>(() => new Map())
   useEffect(() => {
     if (!open) return
@@ -140,7 +146,7 @@ function useEnrichedCatalog(rpc: EnrichedCatalogRpc, open: boolean): Map<string,
       setEntries(map)
     }).catch(() => { /* enrichment is advisory; rows render bare on failure */ })
     return () => { stopped = true }
-  }, [rpc, open])
+  }, [rpc, open, catalogKey])
   return entries
 }
 
@@ -217,7 +223,16 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
   const triggerRef = useRef<HTMLButtonElement>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const id = useMemo(() => `cb-model-${Math.random().toString(36).slice(2, 8)}`, [])
-  const enriched = useEnrichedCatalog(rpc, open)
+  // Identity of the rows the shared directory currently advertises, including
+  // the name and harness description (the credit multiplier) so a display-fact
+  // change is part of the key too. Fed to the enrichment fetch so a catalog
+  // republish (a Host-side add, delete, or credit change) also refreshes the
+  // per-model display facts for an already-open menu.
+  const catalogKey = useMemo(
+    () => state.groups.map((group) => `${group.id}:${group.models.map((model) => `${model.id}\u0000${model.name}\u0000${model.description ?? ''}`).join(',')}`).join('|'),
+    [state.groups],
+  )
+  const enriched = useEnrichedCatalog(rpc, open, catalogKey)
 
   const choices = useMemo(() => state.groups.flatMap((group) => group.models.map((model) => ({
     group,

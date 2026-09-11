@@ -115,6 +115,9 @@ export function resolveConnectionOptions(config: Config = {}): CodeBuddyConnecti
   }
 }
 
+/** How often the plugin re-reads the catalog to notice server-side edits, in ms. */
+const CATALOG_POLL_INTERVAL_MS = 5 * 60 * 1000
+
 /** Mount the plugin: resolve config, then register the route. */
 export function apply(ctx: Context, config: Config = {}): void {
   // Resolved once at load so a bad entry config fails loudly here; the thunk
@@ -124,6 +127,32 @@ export function apply(ctx: Context, config: Config = {}): void {
   const adapter = new CodeBuddyAdapter({ session, options: () => resolved })
 
   ctx.llm.registerAdapter([CODEBUDDY_PROVIDER], adapter)
+
+  // A catalog edit changes which models this route advertises. The harness
+  // catalog the Web client renders its provider groups from is cached
+  // client-side and only refetched on `llm/adapters-updated` (or the settings
+  // and credentials events), so without this republication a model the server
+  // added or deleted would keep its old row in the picker — showing a deleted
+  // model, and rendering an added one bare because the enrichment map, keyed
+  // by id, has no entry for it. The session reports content changes; this is
+  // the one place that turns them into the harness's own topology event.
+  ctx.effect(() => session.onCatalogChange(() => {
+    ctx.emit('llm/adapters-updated')
+  }), 'dsh-llm-codebuddy: catalog change announcements')
+
+  // Convergence for an open Web client that never reopens the menu: re-read
+  // the catalog on the same cadence as its own TTL and announce any change.
+  // The read is advisory (a failure logs and resolves empty) and emits nothing
+  // when the content is unchanged, so an idle harness costs one config read
+  // per interval and no client churn. `unref` keeps this maintenance timer from
+  // being the thing that holds the process alive on its own.
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      void session.refreshCatalog()
+    }, CATALOG_POLL_INTERVAL_MS)
+    timer.unref?.()
+    return () => { clearInterval(timer) }
+  }, 'dsh-llm-codebuddy: catalog change polling')
 
   new CodeBuddyAuthService(ctx, session)
 

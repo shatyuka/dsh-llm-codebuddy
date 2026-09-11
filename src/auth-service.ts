@@ -474,6 +474,9 @@ export class CodeBuddyAuthService {
     // Drop the in-memory cache so the next request re-reads disk (finds
     // nothing) instead of serving the now-revoked token.
     this.session?.invalidate()
+    // The picker's model list belonged to the account that just left; announce
+    // so the client drops it instead of showing a signed-out user its models.
+    this.session?.announceCatalogChange()
   }
 
   /**
@@ -499,16 +502,24 @@ export class CodeBuddyAuthService {
    * Read the CodeBuddy model catalog with its display facts (credits, tags,
    * locale descriptions) for the model selector.
    *
-   * Reuses the session's cached catalog (the same 5-minute TTL the adapter
-   * reads through), so an open selector costs no extra config request. Only
-   * models with disclosed capacities are shipped — the same offerability rule
-   * `listModels` applies, so the client's enriched rows align with the rows
-   * the harness catalog already renders.
+   * Bypasses the session's catalog TTL: this endpoint is called when the user
+   * opens the model menu, which is exactly the moment a server-side add or
+   * delete must become visible rather than up to five minutes later. The read
+   * is single-flighted and floor-limited inside the session, so a burst of
+   * opens costs at most one config request. When the read changes the catalog,
+   * the session notifies the plugin, which republishes `llm/adapters-updated`
+   * so the harness catalog the client renders its groups from is dropped and
+   * refetched too — otherwise the enriched rows here would update while the
+   * group list stayed stale.
+   *
+   * Only models with disclosed capacities are shipped — the same offerability
+   * rule `listModels` applies, so the client's enriched rows align with the
+   * rows the harness catalog already renders.
    * @returns the enriched catalog, or a signed-out shape when nothing is stored.
    */
   async models(): Promise<CodeBuddyModelsResult> {
     if (this.session === undefined) return { loggedIn: false, models: [] }
-    const { models, promotions } = await this.session.catalogDataOrEmpty()
+    const { models, promotions } = await this.session.refreshCatalog()
     return {
       loggedIn: true,
       models: models.filter(hasDisclosedCapacity).map(model =>
@@ -533,6 +544,9 @@ export class CodeBuddyAuthService {
       // Drop the in-memory cache so the next request picks up the freshly
       // written credential rather than the pre-login one.
       this.session?.invalidate()
+      // The new account has its own model list; announce so the client drops
+      // whatever it cached for the previous (possibly signed-out) state.
+      this.session?.announceCatalogChange()
       return storage
     } catch {
       // A transport or service failure ends the handshake; the client may

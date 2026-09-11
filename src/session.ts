@@ -11,6 +11,7 @@
  * @module dsh-llm-codebuddy/session
  */
 
+import { createHash } from 'node:crypto'
 import { getConfig, refreshAccessToken } from './codebuddy.js'
 import type { CodeBuddyIdentity } from './codebuddy.js'
 import { fetchUsage } from './usage.js'
@@ -24,6 +25,17 @@ const REFRESH_SKEW_MS = 60_000
 
 /** How long a read catalog is reused before the service is asked again. */
 const CATALOG_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Minimum spacing between forced catalog reads.
+ *
+ * A forced read exists so the picker can track server-side edits, but it costs
+ * a `/v3/config` request. Opening the menu, the change that read announces, and
+ * the client's consequent re-read can otherwise land within the same second, so
+ * a forced read inside this floor degrades to the cached copy — whose
+ * fingerprint is unchanged, so it announces nothing.
+ */
+const CATALOG_FORCE_FLOOR_MS = 3_000
 
 /** Raised when nothing is signed in; carries the remedy in its message. */
 export class NotLoggedInError extends Error {
@@ -39,6 +51,51 @@ export interface SessionLogger {
   error: (message: unknown) => void
 }
 
+/** One cached catalog read: the entries, the campaigns, and when they were read. */
+interface CatalogSnapshot {
+  models: readonly CodeBuddyModel[]
+  promotions: readonly CodeBuddyModelPromotion[]
+  readAt: number
+  /** Stable digest of the offerable entries, compared to detect server-side edits. */
+  fingerprint: string
+}
+
+/**
+ * A stable digest of the catalog's user-visible content.
+ *
+ * Compared before and after a read so an unchanged catalog announces nothing —
+ * a refresh that published unconditionally would make every menu open churn the
+ * client's catalog, its groups, and every dependent surface. The digest covers
+ * only what a picker renders (id, name, credits, tags, locale descriptions,
+ * sizes, capability flags, and reasoning metadata), because anything else the
+ * service echoes is not worth a client refetch; entries are sorted by id so a
+ * reordering alone is not a change.
+ *
+ * `JSON.stringify` preserves the literal field order written here, so the
+ * digest is stable across reads of an identical catalog.
+ * @param models - the catalog entries to digest.
+ * @returns a hex digest.
+ */
+function catalogFingerprint(models: readonly CodeBuddyModel[]): string {
+  const projected = models
+    .map(model => ({
+      id: model.id,
+      name: model.name,
+      credits: model.credits,
+      tags: model.tags,
+      descriptionZh: model.descriptionZh,
+      descriptionEn: model.descriptionEn,
+      maxAllowedSize: model.maxAllowedSize,
+      maxOutputTokens: model.maxOutputTokens,
+      supportsImages: model.supportsImages,
+      supportsToolCall: model.supportsToolCall,
+      supportsReasoning: model.supportsReasoning,
+      reasoning: model.reasoning,
+    }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return createHash('sha256').update(JSON.stringify(projected)).digest('hex')
+}
+
 /**
  * Owns the stored credential for one plugin instance.
  *
@@ -48,10 +105,58 @@ export interface SessionLogger {
 export class CodeBuddySession {
   private storage: CodeBuddyStorage | undefined
   private refreshing: Promise<CodeBuddyIdentity> | undefined
-  private catalog: { models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[], readAt: number } | undefined
-  private catalogRead: Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> | undefined
+  private catalog: CatalogSnapshot | undefined
+  private catalogRead: Promise<CatalogSnapshot> | undefined
+  /**
+   * Digest of the last catalog ever read, kept across {@link invalidate} so a
+   * credential change (a login as a different account) still announces the
+   * catalog it replaces. A token refresh invalidates the cache but leaves this
+   * alone, so the unchanged catalog announces nothing.
+   */
+  private lastFingerprint: string | undefined
+  /**
+   * Change listeners, fired after a read whose content differs from the last
+   * one. Registered by the plugin so a catalog edit reaches the client without
+   * a restart; the session itself stays transport-only and knows nothing about
+   * cordis events.
+   */
+  private readonly catalogListeners = new Set<() => void>()
 
   constructor(private readonly logger?: SessionLogger) {}
+
+  /**
+   * Observe catalog content changes.
+   * @param listener - called after a read that changed the catalog.
+   * @returns the disposer that stops observing.
+   */
+  onCatalogChange(listener: () => void): () => void {
+    this.catalogListeners.add(listener)
+    return () => { this.catalogListeners.delete(listener) }
+  }
+
+  private emitCatalogChange(): void {
+    for (const listener of [...this.catalogListeners]) {
+      try {
+        listener()
+      } catch (error) {
+        // One broken observer must not fail the read that announced it.
+        this.logger?.warn('dsh-codebuddy: a model-catalog change listener failed')
+        this.logger?.warn(error)
+      }
+    }
+  }
+
+  /**
+   * Announce that whatever catalog consumers hold is no longer authoritative.
+   *
+   * Used when the *account* changes rather than the content — a sign-in or
+   * sign-out replaces every model without a content diff to observe — so the
+   * client drops the previous account's list instead of keeping it until some
+   * later read happens to differ.
+   */
+  announceCatalogChange(): void {
+    this.emitCatalogChange()
+  }
 
   /** Forget the in-memory credential and catalog, forcing a re-read from disk. */
   invalidate(): void {
@@ -192,23 +297,63 @@ export class CodeBuddySession {
    * @returns the models and the campaigns in service order.
    */
   async catalogData(signal?: AbortSignal): Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> {
+    return this.catalogDataWith(signal, false)
+  }
+
+  /**
+   * Read the catalog, optionally bypassing the TTL so a server-side edit is
+   * visible immediately rather than up to five minutes later.
+   *
+   * `force` is what lets an explicit user action — opening the model menu, or
+   * the settings page asking for the list — reflect the service's current
+   * state. It is rate-limited by {@link CATALOG_FORCE_FLOOR_MS}: a forced read
+   * arriving within that window of the last read returns the cached copy,
+   * because the catalog cannot have meaningfully changed and each read is a
+   * service round-trip.
+   *
+   * When a read's content differs from the previous one, every registered
+   * change listener fires, which is how the plugin republishes
+   * `llm/adapters-updated` and makes the client drop its cached groups.
+   * @param signal - optional cancellation for the underlying read.
+   * @param force - whether to bypass the cache TTL (subject to the floor).
+   * @returns the models and the campaigns in service order.
+   */
+  private async catalogDataWith(signal: AbortSignal | undefined, force: boolean): Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> {
     const cached = this.catalog
-    if (cached !== undefined && Date.now() - cached.readAt < CATALOG_TTL_MS) {
-      return cached
+    if (cached !== undefined) {
+      const age = Date.now() - cached.readAt
+      if (age < CATALOG_TTL_MS && !(force && age >= CATALOG_FORCE_FLOOR_MS)) {
+        return cached
+      }
     }
+    // Single-flight only when nothing is in flight; a forced read after a
+    // settled one starts fresh rather than joining a response already stale.
     this.catalogRead ??= this.readModels(signal).finally(() => {
       this.catalogRead = undefined
     })
     return this.catalogRead
   }
 
-  private async readModels(signal?: AbortSignal): Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> {
+  private async readModels(signal?: AbortSignal): Promise<CatalogSnapshot> {
     const identity = await this.identity()
     const config = await getConfig(identity, signal)
     const models = config.models.filter(model => typeof model.id === 'string' && model.id.length > 0)
     const promotions = config.modelPromotions ?? []
-    this.catalog = { models, promotions, readAt: Date.now() }
-    return { models, promotions }
+    const fingerprint = catalogFingerprint(models)
+    // Compared against the last read ever, not just the live cache: a login as
+    // a different account clears the cache, and the catalog it replaces still
+    // has to be announced so the picker stops showing the previous account's
+    // models. The first read after mount is silent — there is nothing yet to
+    // invalidate client-side.
+    const changed = this.lastFingerprint !== undefined && this.lastFingerprint !== fingerprint
+    this.lastFingerprint = fingerprint
+    this.catalog = { models, promotions, readAt: Date.now(), fingerprint }
+    // Announced on a microtask, never synchronously: this read's promise is
+    // still the session's shared in-flight one, and a listener that reacted by
+    // reading the catalog again would otherwise join a promise that cannot
+    // settle until this function returns.
+    if (changed) queueMicrotask(() => { this.emitCatalogChange() })
+    return this.catalog
   }
 
   /**
@@ -238,13 +383,44 @@ export class CodeBuddySession {
    * @returns the models and campaigns, or empty lists.
    */
   async catalogDataOrEmpty(signal?: AbortSignal): Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> {
+    return this.catalogDataOrEmptyWith(signal, false, false)
+  }
+
+  /**
+   * Force a fresh catalog read for a user-facing surface, never throwing.
+   *
+   * Bypasses the TTL (subject to the floor) so an explicit action — opening the
+   * model menu, or the settings page asking for the list — sees the service's
+   * current catalog. Unlike {@link catalogDataOrEmpty}, a failed read returns
+   * the last good copy rather than empty lists: this feeds the picker's display
+   * enrichment, where a transient blip must not blank every row's tags and
+   * credit multiplier down to a bare name. Only a signed-out session, or one
+   * that has never read successfully, yields empty lists.
+   * @param signal - optional cancellation.
+   * @returns the current models and campaigns, the last good copy, or empty lists.
+   */
+  async refreshCatalog(signal?: AbortSignal): Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> {
+    return this.catalogDataOrEmptyWith(signal, true, true)
+  }
+
+  /**
+   * Shared advisory read. `force` bypasses the TTL; `fallbackToLastGood`
+   * decides whether a failed read serves the previous snapshot or empty lists.
+   */
+  private async catalogDataOrEmptyWith(signal: AbortSignal | undefined, force: boolean, fallbackToLastGood: boolean): Promise<{ models: readonly CodeBuddyModel[], promotions: readonly CodeBuddyModelPromotion[] }> {
     try {
-      return await this.catalogData(signal)
+      return await this.catalogDataWith(signal, force)
     } catch (error) {
       if (error instanceof NotLoggedInError) return { models: [], promotions: [] }
       this.logger?.warn('dsh-codebuddy: could not read the model catalog')
       this.logger?.warn(error)
-      return { models: [], promotions: [] }
+      // A failed read must not blank a catalog that is still perfectly usable:
+      // the previous snapshot degrades to the bare name/credit rows this plugin
+      // exists to improve, so a transient blip would look like "every model
+      // lost its metadata". The next successful read replaces it and announces
+      // any real change.
+      const cached = fallbackToLastGood ? this.catalog : undefined
+      return cached ?? { models: [], promotions: [] }
     }
   }
 
