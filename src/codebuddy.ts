@@ -182,16 +182,41 @@ function normalizeAccount(account: Account): Account {
   }
 }
 
+/** Why a token refresh produced no new tokens. */
+export type RefreshFailure =
+  /** The service refused the refresh token: it is spent, revoked, or wrong. */
+  | 'rejected'
+  /**
+   * The refresh request never reached a verdict — a transport fault, or a 5xx
+   * from a gateway in front of the service. The stored credential may be
+   * perfectly good, so this must not be reported as "sign in again".
+   */
+  | 'unreachable'
+
+/** A refresh attempt's outcome: new tokens, or why none were issued. */
+export type RefreshResult =
+  | { ok: true, token: AuthToken }
+  | { ok: false, reason: RefreshFailure }
+
 /**
  * Exchange a refresh token for a new access token.
+ *
+ * A refusal and an unreachable service are kept distinct: the caller renders
+ * "sign in again" for the first, but retrying is the remedy for the second, and
+ * conflating them would tell a user with a healthy credential to re-authenticate
+ * because their Wi-Fi blinked. Only a decided, non-retryable answer — a 4xx
+ * other than 408/429, or a 200 envelope carrying a non-zero code — counts as
+ * `rejected`; every other failure is `unreachable`.
  * @param identity - the current identity, including the access token being replaced.
  * @param refreshToken - the refresh token to spend.
- * @returns the new tokens, or `undefined` when the refresh was refused.
+ * @param signal - optional cancellation.
+ * @returns the new tokens, or the reason none were issued.
  */
 export async function refreshAccessToken(
   identity: CodeBuddyIdentity,
   refreshToken: string,
-): Promise<AuthToken | undefined> {
+  signal?: AbortSignal,
+): Promise<RefreshResult> {
   const headers: Record<string, string> = {
     'Accept': 'application/json',
     'Authorization': `Bearer ${identity.accessToken}`,
@@ -205,14 +230,35 @@ export async function refreshAccessToken(
     response = await fetch(`${CODEBUDDY_ENDPOINT}/v2/plugin/auth/token/refresh`, {
       method: 'POST',
       headers,
+      ...signal === undefined ? {} : { signal },
     })
   } catch {
-    return undefined
+    // No verdict was reached, so the credential is not implicated.
+    return { ok: false, reason: 'unreachable' }
   }
-  if (!response.ok) return undefined
-  const body = await response.json() as AuthTokenResponse
-  if (body.code !== 0 || body.data === undefined) return undefined
-  return body.data
+  if (!response.ok) {
+    // 408 and 429 are retryable by definition, and any 5xx is the service's
+    // problem; everything else (401/403 included) means the token was refused.
+    const retryable = response.status === 408 || response.status === 429 || response.status >= 500
+    return { ok: false, reason: retryable ? 'unreachable' : 'rejected' }
+  }
+  let body: AuthTokenResponse
+  try {
+    body = await response.json() as AuthTokenResponse
+  } catch {
+    // A 200 whose body cannot be read is a broken reply, not a refusal.
+    return { ok: false, reason: 'unreachable' }
+  }
+  if (body.code !== 0 || body.data === undefined) return { ok: false, reason: 'rejected' }
+  return { ok: true, token: body.data }
+}
+
+/** The catalog read failed at the transport or HTTP boundary. */
+export class ConfigRequestError extends Error {
+  constructor(detail: string, readonly status?: number, options?: ErrorOptions) {
+    super(detail, options)
+    this.name = 'ConfigRequestError'
+  }
 }
 
 /**
@@ -225,7 +271,9 @@ export async function refreshAccessToken(
  * @param identity - the signed-in identity.
  * @param signal - optional cancellation.
  * @returns the catalog.
- * @throws Error when the service refuses or answers an unusable body.
+ * @throws ConfigRequestError when the service refuses or answers an unusable
+ *   body; its `status` is set for an HTTP refusal so the caller can tell an
+ *   authentication rejection from a transient outage.
  */
 export async function getConfig(
   identity: CodeBuddyIdentity,
@@ -242,17 +290,23 @@ export async function getConfig(
   if (identity.departmentFullName !== undefined) {
     headers['X-Department-Info'] = identity.departmentFullName
   }
-  const response = await fetch(`${CODEBUDDY_ENDPOINT}/v3/config`, {
-    method: 'GET',
-    headers,
-    ...signal === undefined ? {} : { signal },
-  })
+  let response: Response
+  try {
+    response = await fetch(`${CODEBUDDY_ENDPOINT}/v3/config`, {
+      method: 'GET',
+      headers,
+      ...signal === undefined ? {} : { signal },
+    })
+  } catch (error) {
+    // The status stays undefined: no HTTP verdict was reached.
+    throw new ConfigRequestError('CodeBuddy config request failed (transport)', undefined, { cause: error })
+  }
   if (!response.ok) {
-    throw new Error(`CodeBuddy config request failed (HTTP ${response.status})`)
+    throw new ConfigRequestError(`CodeBuddy config request failed (HTTP ${response.status})`, response.status)
   }
   const body = await response.json() as ConfigResponse
   if (body.code !== 0 || body.data === undefined) {
-    throw new Error(`CodeBuddy config request failed: ${body.code} - ${body.msg}`)
+    throw new ConfigRequestError(`CodeBuddy config request failed: ${body.code} - ${body.msg}`)
   }
   return body.data
 }

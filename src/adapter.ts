@@ -37,7 +37,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
 } from './constants.js'
-import { NotLoggedInError } from './session.js'
+import { NotLoggedInError, SessionUnavailableError } from './session.js'
 import type { CodeBuddySession } from './session.js'
 import { parseSse } from './sse.js'
 import { serializeRequest } from './serialize.js'
@@ -274,6 +274,12 @@ export class CodeBuddyAdapter extends LlmAdapter {
     } catch (error) {
       if (error instanceof NotLoggedInError) {
         throw new LlmError(error.message, 'MISSING_CREDENTIAL', { cause: error })
+      }
+      if (error instanceof SessionUnavailableError) {
+        // The credential was never judged — the refresh endpoint was
+        // unreachable. `TRANSPORT` is in the default retryable set, so the
+        // harness retries instead of telling the user to sign in again.
+        throw new LlmError(error.message, 'TRANSPORT', { cause: error })
       }
       throw error
     }

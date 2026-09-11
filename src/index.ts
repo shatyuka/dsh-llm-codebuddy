@@ -5,9 +5,8 @@
  * login rather than an API key, and serving the models CodeBuddy's own
  * (non-OpenAI) catalog endpoint reports.
  *
- * Sign in through the Web Settings → CodeBuddy page, or `npx dsh-codebuddy-login`
- * from a terminal. No API key is required, and the running harness picks the
- * credential up without a restart.
+ * Sign in through the Web Settings → CodeBuddy page. No API key is required,
+ * and the running harness picks the credential up without a restart.
  *
  * @module dsh-llm-codebuddy
  */
@@ -38,13 +37,15 @@ export type {
   CodeBuddyUsageResult,
   CodeBuddyUsageWindow,
 } from './auth-service.js'
-export { CodeBuddySession, NotLoggedInError } from './session.js'
+export { CodeBuddySession, NotLoggedInError, SessionUnavailableError } from './session.js'
 export { login } from './login.js'
 export type { LoginHooks, LoginResult } from './login.js'
 export { clearStorage, getStoragePath, loadStorage, saveStorage } from './storage.js'
 export type { CodeBuddyStorage } from './storage.js'
 export { fetchUsage, fetchPersonalUsage, fetchEnterpriseUsage, parseUsage } from './usage.js'
 export type { UsageSnapshot, UsageWindow } from './usage.js'
+export { ConfigRequestError } from './codebuddy.js'
+export type { RefreshFailure, RefreshResult } from './codebuddy.js'
 export * from './constants.js'
 export { hasDisclosedCapacity } from './types.js'
 export type * from './types.js'
@@ -163,7 +164,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (loggedIn) return
     ctx.logger.info(
       'llm-codebuddy: no CodeBuddy session stored; sign in through the Settings'
-      + ' → CodeBuddy page, or run `npx dsh-codebuddy-login` (no API key needed).',
+      + ' → CodeBuddy page.',
     )
   }).catch(() => {
     // Reporting login state is advisory and must never fail the mount.

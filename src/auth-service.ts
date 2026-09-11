@@ -34,6 +34,8 @@ export const CODEBUDDY_AUTH_CHANNEL = '/codebuddy'
 export interface CodeBuddyAuthStatus {
   /** Whether a usable credential is stored. */
   loggedIn: boolean
+  /** Set when a credential exists but can no longer authenticate. */
+  expired?: boolean
   /** Signed-in display name, when available. */
   nickname?: string
   /** Account uid, when available. */
@@ -409,12 +411,25 @@ export class CodeBuddyAuthService {
 
   /**
    * Read the stored credential without requiring one.
-   * @returns the current auth status; `loggedIn` is false when nothing is stored.
+   *
+   * A stored file is not sufficient for `loggedIn: true`: a session whose
+   * access and refresh tokens have both expired reads as signed in but fails
+   * every request, which leaves the settings page claiming an account while the
+   * model list is empty and no error is shown. The credential is therefore
+   * probed for usability, and an unusable one reports `loggedIn: false` so the
+   * page offers the sign-in affordance. An unreachable service still reports
+   * signed in — the credential was not refused.
+   * @returns the current auth status; `loggedIn` is false when nothing usable is stored.
    */
   async status(): Promise<CodeBuddyAuthStatus> {
     const stored = await loadStorage()
     if (stored === undefined) {
       return { loggedIn: false }
+    }
+    if (!(await this.session?.isUsable() ?? true)) {
+      // A credential is on disk but cannot authenticate: report the expiry so
+      // the page asks for a fresh sign-in instead of looking merely unused.
+      return { loggedIn: false, expired: true }
     }
     return {
       loggedIn: true,
@@ -515,10 +530,14 @@ export class CodeBuddyAuthService {
    * Only models with disclosed capacities are shipped — the same offerability
    * rule `listModels` applies, so the client's enriched rows align with the
    * rows the harness catalog already renders.
-   * @returns the enriched catalog, or a signed-out shape when nothing is stored.
+   * @returns the enriched catalog, or a signed-out shape when nothing usable is stored.
    */
   async models(): Promise<CodeBuddyModelsResult> {
     if (this.session === undefined) return { loggedIn: false, models: [] }
+    // Report the real login state rather than an unconditional `true`: the
+    // client uses this flag to decide whether to render the rows at all, and a
+    // signed-out session must not look like a signed-in one with no models.
+    if (!(await this.session.isUsable())) return { loggedIn: false, models: [] }
     const { models, promotions } = await this.session.refreshCatalog()
     return {
       loggedIn: true,

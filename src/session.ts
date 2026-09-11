@@ -12,7 +12,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { getConfig, refreshAccessToken } from './codebuddy.js'
+import { ConfigRequestError, getConfig, refreshAccessToken } from './codebuddy.js'
 import type { CodeBuddyIdentity } from './codebuddy.js'
 import { fetchUsage } from './usage.js'
 import type { UsageSnapshot } from './usage.js'
@@ -42,6 +42,23 @@ export class NotLoggedInError extends Error {
   constructor(detail: string) {
     super(detail)
     this.name = 'NotLoggedInError'
+  }
+}
+
+/**
+ * Raised when the credential could not be validated because the service was
+ * unreachable, so the stored session may well still be valid.
+ *
+ * Deliberately separate from {@link NotLoggedInError}: the remedy is to retry,
+ * not to sign in again, and the adapter maps this to the retryable `TRANSPORT`
+ * code rather than the terminal `MISSING_CREDENTIAL` one. Reporting a network
+ * blip as an expired login would send a correctly-signed-in user through a
+ * pointless browser handshake.
+ */
+export class SessionUnavailableError extends Error {
+  constructor(detail: string, options?: ErrorOptions) {
+    super(detail, options)
+    this.name = 'SessionUnavailableError'
   }
 }
 
@@ -104,6 +121,10 @@ function catalogFingerprint(models: readonly CodeBuddyModel[]): string {
  */
 export class CodeBuddySession {
   private storage: CodeBuddyStorage | undefined
+  /** In-flight disk read, shared so concurrent callers read the file once. */
+  private storageRead: Promise<CodeBuddyStorage | undefined> | undefined
+  /** Retires in-flight disk reads when the cached credential is dropped. */
+  private storageGeneration = 0
   private refreshing: Promise<CodeBuddyIdentity> | undefined
   private catalog: CatalogSnapshot | undefined
   private catalogRead: Promise<CatalogSnapshot> | undefined
@@ -158,10 +179,20 @@ export class CodeBuddySession {
     this.emitCatalogChange()
   }
 
-  /** Forget the in-memory credential and catalog, forcing a re-read from disk. */
+  /**
+   * Forget the in-memory credential and catalog, forcing a re-read from disk.
+   *
+   * Bumping the generation retires any disk read already in flight: it must not
+   * install the snapshot it started from after this point, or a 401-triggered
+   * invalidation could be undone by a read that was already underway.
+   */
   invalidate(): void {
     this.storage = undefined
     this.catalog = undefined
+    this.storageGeneration += 1
+    // Drop the shared read so the next caller starts a fresh one instead of
+    // reusing a snapshot this invalidation just retired.
+    this.storageRead = undefined
   }
 
   private identityOf(storage: CodeBuddyStorage): CodeBuddyIdentity {
@@ -183,26 +214,69 @@ export class CodeBuddySession {
    * @throws NotLoggedInError when nothing is stored.
    */
   private async require(): Promise<CodeBuddyStorage> {
-    this.storage ??= await loadStorage()
-    if (this.storage === undefined) {
+    const storage = await this.load()
+    if (storage === undefined) {
       throw new NotLoggedInError(
-        'CodeBuddy is not signed in. Run `npx dsh-codebuddy-login` (or `npm run login` in this'
-        + ' plugin) to sign in through your browser; no API key is required.',
+        'CodeBuddy is not signed in. Sign in through the Settings page; no API key is required.',
       )
+    }
+    return storage
+  }
+
+  /**
+   * Read the credential from disk, sharing one in-flight read and never
+   * clobbering a newer value.
+   *
+   * The naive `this.storage ??= await loadStorage()` is wrong under
+   * concurrency: the null check runs *before* the await while the assignment
+   * runs after it, so a slow disk read can land after a token refresh has
+   * already installed fresh tokens and overwrite them with the stale snapshot
+   * it started from. The next caller then sees an expired access token again
+   * and spends the refresh token a second time — and since CodeBuddy rotates
+   * refresh tokens, replaying the spent one can end the session outright.
+   *
+   * The result is therefore adopted only if nothing newer arrived while the
+   * read was in flight, and concurrent callers share the one read.
+   * @returns the credential, or `undefined` when none is stored.
+   */
+  private async load(): Promise<CodeBuddyStorage | undefined> {
+    if (this.storage !== undefined) return this.storage
+    const generation = this.storageGeneration
+    // Capture the promise locally rather than reading the shared slot at await
+    // time: an invalidation during the read clears that slot, and this caller
+    // must still settle on the read it actually started.
+    let read = this.storageRead
+    if (read === undefined) {
+      read = loadStorage()
+      this.storageRead = read
+      // Both callbacks clear the slot, and `then` rather than `finally` is
+      // deliberate: `finally` would forward a rejection into a derived promise
+      // that nothing awaits, turning a failed read into an unhandled rejection
+      // on top of the one this caller already sees.
+      const clear = (): void => {
+        // Clear only if the slot still holds this read; a newer one may have
+        // replaced it.
+        if (this.storageRead === read) this.storageRead = undefined
+      }
+      void read.then(clear, clear)
+    }
+    const loaded = await read
+    // Adopt the read result only if nothing newer arrived meanwhile: a refresh,
+    // a login, or an invalidation during the read all outrank this snapshot.
+    if (this.storage === undefined && this.storageGeneration === generation && loaded !== undefined) {
+      this.storage = loaded
     }
     return this.storage
   }
 
   /** Whether a credential exists at all, without requiring one. */
   async isLoggedIn(): Promise<boolean> {
-    this.storage ??= await loadStorage()
-    return this.storage !== undefined
+    return await this.load() !== undefined
   }
 
   /** The signed-in nickname, when a credential exists. */
   async nickname(): Promise<string | undefined> {
-    this.storage ??= await loadStorage()
-    return this.storage?.account.nickname
+    return (await this.load())?.account.nickname
   }
 
   /**
@@ -220,8 +294,7 @@ export class CodeBuddySession {
     }
     if (now >= storage.auth.refreshExpiresAt) {
       throw new NotLoggedInError(
-        'The CodeBuddy session has expired. Run `npx dsh-codebuddy-login` to sign in again'
-        + ' through your browser.',
+        'The CodeBuddy session has expired. Sign in again.',
       )
     }
     this.refreshing ??= this.refresh(storage).finally(() => {
@@ -230,14 +303,50 @@ export class CodeBuddySession {
     return this.refreshing
   }
 
-  private async refresh(storage: CodeBuddyStorage): Promise<CodeBuddyIdentity> {
-    const refreshed = await refreshAccessToken(this.identityOf(storage), storage.auth.refreshToken)
-    if (refreshed === undefined) {
-      throw new NotLoggedInError(
-        'Refreshing the CodeBuddy session failed. Run `npx dsh-codebuddy-login` to sign in again'
-        + ' through your browser.',
-      )
+  /**
+   * Whether the stored credential can still authenticate a request.
+   *
+   * A stored file is not the same as a usable session: an expired access token
+   * with an expired refresh token leaves a credential that reads as signed in
+   * but fails every call. Surfaces that report login state use this instead of
+   * {@link isLoggedIn} so they do not claim "signed in" while the model list is
+   * empty.
+   *
+   * Resolving an identity is a pure local check when the access token is still
+   * fresh (no network), and spends the refresh token only when it is at or near
+   * expiry — the same work the next request would do anyway, and it is
+   * single-flighted. An unreachable service is reported as `true`: the
+   * credential was not refused, and flipping a user to "signed out" because the
+   * network blipped would be wrong.
+   * @returns true when a request could be authenticated (or might, if the
+   *   service is merely unreachable).
+   */
+  async isUsable(): Promise<boolean> {
+    try {
+      await this.identity()
+      return true
+    } catch (error) {
+      if (error instanceof NotLoggedInError) return false
+      // An unreachable service says nothing about the credential's validity.
+      return true
     }
+  }
+
+  private async refresh(storage: CodeBuddyStorage): Promise<CodeBuddyIdentity> {
+    const result = await refreshAccessToken(this.identityOf(storage), storage.auth.refreshToken)
+    if (!result.ok) {
+      // A refusal is terminal for this credential; an unreachable service is
+      // not, so it must not carry the "sign in again" remedy.
+      throw result.reason === 'rejected'
+        ? new NotLoggedInError(
+            'Refreshing the CodeBuddy session failed. Sign in again.',
+          )
+        : new SessionUnavailableError(
+            'Could not reach CodeBuddy to refresh the session; the stored credential was not'
+            + ' rejected. Check the network and retry.',
+          )
+    }
+    const refreshed = result.token
     const next: CodeBuddyStorage = {
       auth: {
         accessToken: refreshed.accessToken,
@@ -336,7 +445,20 @@ export class CodeBuddySession {
 
   private async readModels(signal?: AbortSignal): Promise<CatalogSnapshot> {
     const identity = await this.identity()
-    const config = await getConfig(identity, signal)
+    let config
+    try {
+      config = await getConfig(identity, signal)
+    } catch (error) {
+      // Mirror the chat path: a 401/403 means the stored token was rejected
+      // outright, so drop it and let the next call re-read the file (a
+      // concurrent login may have replaced it) instead of retrying a token
+      // already known to be refused. Without this the catalog read would keep
+      // presenting a revoked token until some chat request happened to 401.
+      if (error instanceof ConfigRequestError && (error.status === 401 || error.status === 403)) {
+        this.invalidate()
+      }
+      throw error
+    }
     const models = config.models.filter(model => typeof model.id === 'string' && model.id.length > 0)
     const promotions = config.modelPromotions ?? []
     const fingerprint = catalogFingerprint(models)

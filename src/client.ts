@@ -166,6 +166,7 @@ if (typeof window !== 'undefined' && window.localStorage !== undefined) {
 /** The status shape the host `status` endpoint returns. */
 interface AuthStatus {
   loggedIn: boolean
+  expired?: boolean
   nickname?: string
   uid?: string
   uin?: string
@@ -599,7 +600,12 @@ function CodeBuddySection({ rpc, t }: {
         )
       : h('div', { style: s.status },
           h('p', { style: s.muted },
-            loginState !== undefined ? t('waiting') : t('notSignedIn'),
+            loginState !== undefined ? t('waiting')
+              // A credential exists but expired: name the remedy rather than
+              // reporting a bare "not signed in", which reads as "nothing ever
+              // happened here" and hides that a sign-in is what is missing.
+              : status?.expired === true ? t('expired')
+                : t('notSignedIn'),
           ),
           h('div', { style: s.actions },
             h(Button, {
@@ -729,6 +735,7 @@ const DICTS = {
     'intro': '使用腾讯 CodeBuddy 账号登录。',
     'loading': '加载中…',
     'notSignedIn': '未登录。',
+    'expired': '登录已过期，请重新登录。',
     'waiting': '等待浏览器登录完成…',
     'signIn': '登录',
     'signingIn': '登录中…',
@@ -758,6 +765,7 @@ const DICTS = {
     'intro': 'Sign in with your Tencent CodeBuddy account.',
     'loading': 'Loading…',
     'notSignedIn': 'Not signed in.',
+    'expired': 'Your session has expired. Please sign in again.',
     'waiting': 'Waiting for the browser sign-in to complete…',
     'signIn': 'Sign in',
     'signingIn': 'Signing in…',
