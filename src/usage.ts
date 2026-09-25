@@ -37,10 +37,12 @@ export interface UsageSnapshot {
   /** One entry per metering window the plane reported; empty on failure. */
   windows: UsageWindow[]
   /**
-   * The first window's figures, surfaced for a single-bar affordance.
+   * The figures a single-bar affordance should reflect.
    *
-   * Enterprise tenants report exactly one window, and a personal account's
-   * first active package is the one a glance affordance should reflect.
+   * Enterprise tenants report exactly one window. A personal account reports one
+   * window per active package and draws down a base package plus any granted
+   * ones, so this carries the sum across every capped package rather than any
+   * single package's figures; `windows` keeps the per-package detail.
    */
   primary?: UsageWindow
 }
@@ -200,7 +202,39 @@ function personalUsage(accounts: unknown[]): UsageSnapshot {
       ...resetsAt === undefined ? {} : { resetsAt },
     }
   })
-  return { windows, ...windows.length > 0 ? { primary: windows[0] } : {} }
+  // The single-bar affordance must reflect the account's whole allowance, not a
+  // single package: a personal account draws down a base package plus any number
+  // of grant/bonus packages, and `windows[0]` is only whichever package the
+  // service happens to list first. Surfacing that one alone reads 100% the
+  // moment the base package empties, while the granted credits that actually
+  // pay for the next request are still untouched. The aggregate sums every
+  // capped window, so the bar matches the total remaining the console reports.
+  type CappedWindow = UsageWindow & { used: number, limit: number }
+  const capped = windows.filter((window): window is CappedWindow =>
+    window.limit !== undefined && window.limit > 0 && window.used !== undefined)
+  if (capped.length === 0) {
+    return { windows, ...windows.length > 0 ? { primary: windows[0] } : {} }
+  }
+  const totalUsed = capped.reduce((sum, window) => sum + window.used, 0)
+  const totalLimit = capped.reduce((sum, window) => sum + window.limit, 0)
+  // A package's reset only matters while it still holds credits: a spent base
+  // package resetting tomorrow must not mask the grant that expires in a month.
+  // Once every package is spent there is nothing to fall back on but the
+  // earliest reset overall, which is the one the account is waiting on.
+  const withHeadroom = capped.filter(window => window.limit - window.used > 0)
+  const resetsAt = (withHeadroom.length > 0 ? withHeadroom : capped)
+    .map(window => window.resetsAt)
+    .filter(value => value !== undefined)
+    .sort()[0]
+  const pct = percent(totalUsed, totalLimit)
+  const primary: UsageWindow = {
+    name: 'total',
+    used: totalUsed,
+    limit: totalLimit,
+    ...pct === undefined ? {} : { usedPercent: pct },
+    ...resetsAt === undefined ? {} : { resetsAt },
+  }
+  return { windows, primary }
 }
 
 /**
