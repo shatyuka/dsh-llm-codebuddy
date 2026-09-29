@@ -6,6 +6,8 @@
  * the browser bundle.
  */
 
+import type { CodeBuddySiteId } from './constants.js'
+
 /** Logical RPC channel owned by the CodeBuddy authentication service. */
 export const CODEBUDDY_AUTH_CHANNEL = '/codebuddy'
 
@@ -77,7 +79,7 @@ export interface CodeBuddyModelsResult {
 /** Request and response types for every endpoint on the private channel. */
 export interface CodeBuddyRpcMap {
   status: { request: Record<string, never>, response: CodeBuddyAuthStatus }
-  startLogin: { request: Record<string, never>, response: CodeBuddyLoginStart }
+  startLogin: { request: { site: CodeBuddySiteId }, response: CodeBuddyLoginStart }
   pollLogin: { request: { state: string }, response: CodeBuddyLoginPoll }
   logout: { request: Record<string, never>, response: void }
   usage: { request: Record<string, never>, response: CodeBuddyUsageResult }

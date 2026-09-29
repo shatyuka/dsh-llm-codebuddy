@@ -16,7 +16,6 @@ import { CodeBuddyAdapter } from './adapter.js'
 import type { CodeBuddyConnectionOptions } from './adapter.js'
 import { CodeBuddyAuthService } from './auth-service.js'
 import {
-  CODEBUDDY_CHAT_BASE,
   CODEBUDDY_PROVIDER,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
@@ -82,7 +81,7 @@ export const inject = ['llm']
  * durable storage and edits apply without a reload.
  */
 export const Config = z.object({
-  /** Chat endpoint base; defaults to CodeBuddy's OpenAI-compatible route. */
+  /** Chat endpoint base override; omit to follow the credential's site. */
   baseURL: z.string(),
   /** Context capacity for a model the catalog does not size. */
   defaultContextWindow: z.number(),
@@ -126,14 +125,13 @@ export function resolveConnectionOptions(config: Config = {}): CodeBuddyConnecti
   if (!Number.isFinite(streamIdleTimeoutMs) || streamIdleTimeoutMs <= 0) {
     throw new Error('dsh-llm-codebuddy: streamIdleTimeoutMs must be a positive finite number')
   }
-  const baseURL = config.baseURL ?? CODEBUDDY_CHAT_BASE
-  if (baseURL.length === 0) {
+  if (config.baseURL !== undefined && config.baseURL.length === 0) {
     throw new Error('dsh-llm-codebuddy: baseURL must not be empty')
   }
   return {
     // A trailing slash would produce `//chat/completions`, which some gateways
     // route differently.
-    baseURL: baseURL.replace(/\/+$/, ''),
+    ...config.baseURL === undefined ? {} : { baseURL: config.baseURL.replace(/\/+$/, '') },
     defaultContextWindow: positiveInteger(
       config.defaultContextWindow,
       'defaultContextWindow',

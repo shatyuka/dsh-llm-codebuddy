@@ -11,6 +11,8 @@
 import { spawn } from 'node:child_process'
 import { getLoginAccount, pollAuthToken, requestAuthState } from './codebuddy.js'
 import { saveStorage } from './storage.js'
+import { resolveSite } from './constants.js'
+import type { CodeBuddySiteId } from './constants.js'
 import type { Account, AuthToken } from './types.js'
 import type { CodeBuddyStorage } from './storage.js'
 
@@ -26,12 +28,18 @@ export interface LoginResult {
  *
  * Shared by the CLI flow and the Web auth service so the two cannot drift on
  * the storage shape: both write exactly this object.
+ * @param site - the deployment the tokens were issued by.
  * @param token - tokens issued once the browser login completed.
  * @param account - the signed-in account the tokens were issued for.
  * @returns the credential to persist.
  */
-export function buildStorage(token: AuthToken, account: Account): CodeBuddyStorage {
+export function buildStorage(
+  site: CodeBuddySiteId,
+  token: AuthToken,
+  account: Account,
+): CodeBuddyStorage {
   return {
+    site,
     auth: {
       accessToken: token.accessToken,
       expiresAt: Date.now() + token.expiresIn * 1000,
@@ -59,6 +67,10 @@ export interface LoginHooks {
   onUrl?: (url: string) => void
   /** Whether to try opening the browser automatically. */
   openBrowser?: boolean
+  /**
+   * Deployment to sign in to; an unknown value falls back to the default.
+   */
+  site?: CodeBuddySiteId
 }
 
 /**
@@ -86,25 +98,26 @@ function openInBrowser(url: string): void {
 
 /**
  * Run the whole browser-login flow.
- * @param hooks - user-interaction hooks.
+ * @param hooks - user-interaction hooks, including the deployment to sign in to.
  * @param signal - optional cancellation.
  * @returns the persisted credential and the signed-in nickname.
  * @throws Error when the handshake fails, the user does not finish in time, or
  *   the account cannot be read.
  */
 export async function login(hooks: LoginHooks = {}, signal?: AbortSignal): Promise<LoginResult> {
-  const state = await requestAuthState(signal)
+  const site = resolveSite(hooks.site)
+  const state = await requestAuthState(site, signal)
   hooks.onUrl?.(state.authUrl)
   if (hooks.openBrowser !== false) openInBrowser(state.authUrl)
 
-  const token = await pollAuthToken(state.state, signal)
+  const token = await pollAuthToken(site, state.state, signal)
   if (token === undefined) {
     throw new Error('CodeBuddy sign-in did not complete (it was refused, or it timed out).')
   }
 
-  const account = await getLoginAccount(state.state, token.accessToken, token.domain)
+  const account = await getLoginAccount(site, state.state, token.accessToken, token.domain)
 
-  const storage = buildStorage(token, account)
+  const storage = buildStorage(site, token, account)
   await saveStorage(storage)
   return { storage, nickname: account.nickname }
 }

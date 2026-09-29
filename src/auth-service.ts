@@ -20,6 +20,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { getLoginAccount, pollAuthToken, requestAuthState } from './codebuddy.js'
 import { buildStorage } from './login.js'
+import { resolveSite } from './constants.js'
+import type { CodeBuddySiteId } from './constants.js'
 import type { CodeBuddySession } from './session.js'
 import { clearStorage, loadStorage, saveStorage } from './storage.js'
 import type { CodeBuddyStorage } from './storage.js'
@@ -70,6 +72,18 @@ function ok<T>(value: T): RpcOk<T> {
 
 function err(code: string, message: string): RpcErr {
   return { ok: false, error: { code, message, details: {} } }
+}
+
+/**
+ * Read the site out of a `startLogin` payload.
+ * @param payload - the RPC payload.
+ * @returns the requested site, or the default when absent or unknown.
+ */
+function siteOf(payload: unknown): CodeBuddySiteId {
+  const value = typeof payload === 'object' && payload !== null && 'site' in payload
+    ? (payload as { site: unknown }).site
+    : undefined
+  return resolveSite(value)
 }
 
 /**
@@ -365,7 +379,7 @@ export class CodeBuddyAuthService {
   private async dispatch(endpoint: string, payload: unknown, _signal: AbortSignal): Promise<RpcOk<unknown> | RpcErr> {
     switch (endpoint) {
       case 'status': return ok(await this.status())
-      case 'startLogin': return ok(await this.startLogin())
+      case 'startLogin': return ok(await this.startLogin(siteOf(payload)))
       case 'pollLogin': {
         const state = typeof payload === 'object' && payload !== null && 'state' in payload
           ? String((payload as { state: unknown }).state)
@@ -420,13 +434,14 @@ export class CodeBuddyAuthService {
 
   /**
    * Start a browser-login handshake.
+   * @param site - the deployment to sign in to.
    * @returns the URL the user must open.
    */
-  async startLogin(): Promise<CodeBuddyLoginStart> {
-    const handshake = await requestAuthState()
+  async startLogin(site: CodeBuddySiteId): Promise<CodeBuddyLoginStart> {
+    const handshake = await requestAuthState(site)
     const pending: PendingLogin = {
       state: handshake.state,
-      promise: this.runLogin(handshake.state),
+      promise: this.runLogin(site, handshake.state),
     }
     this.pending.set(handshake.state, pending)
     // Reap the entry once the handshake settles either way, so the table does
@@ -530,12 +545,12 @@ export class CodeBuddyAuthService {
    * Returns `undefined` on any failure so the client's poll resolves
    * `done: false` and may retry from `startLogin`.
    */
-  private async runLogin(state: string): Promise<CodeBuddyStorage | undefined> {
+  private async runLogin(site: CodeBuddySiteId, state: string): Promise<CodeBuddyStorage | undefined> {
     try {
-      const token = await pollAuthToken(state)
+      const token = await pollAuthToken(site, state)
       if (token === undefined) return undefined
-      const account = await getLoginAccount(state, token.accessToken, token.domain)
-      const storage = buildStorage(token, account)
+      const account = await getLoginAccount(site, state, token.accessToken, token.domain)
+      const storage = buildStorage(site, token, account)
       await saveStorage(storage)
       // Drop the in-memory cache so the next request picks up the freshly
       // written credential rather than the pre-login one.

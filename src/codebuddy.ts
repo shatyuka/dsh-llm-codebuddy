@@ -13,11 +13,12 @@
 
 import {
   CODE_AUTH_PENDING,
-  CODEBUDDY_ENDPOINT,
-  CODEBUDDY_IDE_USER_AGENT,
   LOGIN_POLL_INTERVAL_MS,
   LOGIN_TIMEOUT_MS,
+  catalogUserAgentOf,
+  endpointOf,
 } from './constants.js'
+import type { CodeBuddySiteId } from './constants.js'
 import type {
   Account,
   AccountResponse,
@@ -36,6 +37,8 @@ export interface CodeBuddyIdentity {
   uid: string
   enterpriseId?: string
   departmentFullName?: string
+  /** Deployment this credential belongs to. */
+  site: CodeBuddySiteId
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -58,12 +61,13 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 
 /**
  * Start a browser-login handshake.
+ * @param site - the deployment to sign in to.
  * @param signal - optional cancellation.
  * @returns the handshake state and the URL the user must open.
  * @throws Error when the service refuses or answers an unusable body.
  */
-export async function requestAuthState(signal?: AbortSignal): Promise<AuthState> {
-  const response = await fetch(`${CODEBUDDY_ENDPOINT}/v2/plugin/auth/state?platform=CLI`, {
+export async function requestAuthState(site: CodeBuddySiteId, signal?: AbortSignal): Promise<AuthState> {
+  const response = await fetch(`${endpointOf(site)}/v2/plugin/auth/state?platform=CLI`, {
     method: 'POST',
     headers: {
       'Accept': 'application/json',
@@ -90,17 +94,22 @@ export async function requestAuthState(signal?: AbortSignal): Promise<AuthState>
  * which is the one code that continues the loop; anything else is a decided
  * outcome and ends it. A transport error also ends it, because a handshake
  * whose state may already be spent must not be retried silently.
+ * @param site - the deployment the handshake was started against.
  * @param state - the handshake id from {@link requestAuthState}.
  * @param signal - optional cancellation.
  * @returns the issued tokens, or `undefined` when the login failed or timed out.
  */
-export async function pollAuthToken(state: string, signal?: AbortSignal): Promise<AuthToken | undefined> {
+export async function pollAuthToken(
+  site: CodeBuddySiteId,
+  state: string,
+  signal?: AbortSignal,
+): Promise<AuthToken | undefined> {
   const deadline = Date.now() + LOGIN_TIMEOUT_MS
   while (Date.now() < deadline) {
     await delay(LOGIN_POLL_INTERVAL_MS, signal)
     let response: Response
     try {
-      response = await fetch(`${CODEBUDDY_ENDPOINT}/v2/plugin/auth/token?state=${encodeURIComponent(state)}`, {
+      response = await fetch(`${endpointOf(site)}/v2/plugin/auth/token?state=${encodeURIComponent(state)}`, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -123,6 +132,7 @@ export async function pollAuthToken(state: string, signal?: AbortSignal): Promis
 /**
  * Read the signed-in account, whose uid and enterprise id become required
  * headers on every later request.
+ * @param site - the deployment the handshake was started against.
  * @param state - the handshake id the tokens were issued for.
  * @param accessToken - the freshly issued access token.
  * @param domain - the tenant domain the tokens were issued for.
@@ -130,12 +140,13 @@ export async function pollAuthToken(state: string, signal?: AbortSignal): Promis
  * @throws Error when the service refuses or answers an unusable body.
  */
 export async function getLoginAccount(
+  site: CodeBuddySiteId,
   state: string,
   accessToken: string,
   domain: string,
 ): Promise<Account> {
   const response = await fetch(
-    `${CODEBUDDY_ENDPOINT}/v2/plugin/login/account?state=${encodeURIComponent(state)}`,
+    `${endpointOf(site)}/v2/plugin/login/account?state=${encodeURIComponent(state)}`,
     {
       method: 'GET',
       headers: {
@@ -227,7 +238,7 @@ export async function refreshAccessToken(
   if (identity.enterpriseId !== undefined) headers['X-Enterprise-Id'] = identity.enterpriseId
   let response: Response
   try {
-    response = await fetch(`${CODEBUDDY_ENDPOINT}/v2/plugin/auth/token/refresh`, {
+    response = await fetch(`${endpointOf(identity.site)}/v2/plugin/auth/token/refresh`, {
       method: 'POST',
       headers,
       ...signal === undefined ? {} : { signal },
@@ -281,7 +292,7 @@ export async function getConfig(
 ): Promise<CodeBuddyConfig> {
   const headers: Record<string, string> = {
     'Accept': 'application/json',
-    'User-Agent': CODEBUDDY_IDE_USER_AGENT,
+    'User-Agent': catalogUserAgentOf(identity.site),
     'Authorization': `Bearer ${identity.accessToken}`,
     'X-Domain': identity.domain,
     'X-User-Id': identity.uid,
@@ -292,7 +303,7 @@ export async function getConfig(
   }
   let response: Response
   try {
-    response = await fetch(`${CODEBUDDY_ENDPOINT}/v3/config`, {
+    response = await fetch(`${endpointOf(identity.site)}/v3/config`, {
       method: 'GET',
       headers,
       ...signal === undefined ? {} : { signal },

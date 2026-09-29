@@ -42,6 +42,7 @@ import {
   DANGER_PCT_MIN,
 } from '../settings.js'
 import { CODEBUDDY_AUTH_CHANNEL as AUTH_CHANNEL } from '../protocol.js'
+import type { CodeBuddySiteId } from '../constants.js'
 import type {
   CodeBuddyAuthStatus as AuthStatus,
   CodeBuddyRpcEndpoint,
@@ -365,9 +366,9 @@ function CodeBuddySection({ rpc, t, prefs }: {
     return () => { stopped = true }
   }, [loginState, rpc, refresh])
 
-  const startLogin = useCallback(async () => {
+  const startLogin = useCallback(async (site: CodeBuddySiteId) => {
     setError(undefined)
-    const result = await rpc.call('startLogin', {})
+    const result = await rpc.call('startLogin', { site })
     if (!result.ok) {
       setError(describeError(result))
       setPhase('error')
@@ -401,7 +402,6 @@ function CodeBuddySection({ rpc, t, prefs }: {
 
   return h('div', { style: s.section },
     h('h2', { style: s.title }, 'CodeBuddy'),
-    !signedIn ? h('p', { style: s.desc }, t('intro')) : null,
     error !== undefined ? h('p', { style: s.error }, error) : null,
     signedIn
       ? h('div', { style: s.status },
@@ -430,25 +430,33 @@ function CodeBuddySection({ rpc, t, prefs }: {
           usagePrefs,
         )
       : h('div', { style: s.status },
+          h('p', { style: s.desc }, t('intro')),
           h('p', { style: s.muted },
+            // Expired names the remedy; a bare "not signed in" would hide
+            // that a sign-in is what is missing.
             loginState !== undefined ? t('waiting')
-              // Expired names the remedy; a bare "not signed in" would hide
-              // that a sign-in is what is missing.
               : status?.expired === true ? t('expired')
                 : t('notSignedIn'),
           ),
+          // Separate accounts per host: the site must be chosen, not inferred.
           h('div', { style: s.actions },
-            h(Button, {
+            SIGN_IN_SITES.map(site => h(Button, {
+              key: site,
               variant: 'primary',
               size: 'md',
               disabled: loginState !== undefined,
-              onClick: () => { void startLogin() },
-            }, loginState !== undefined ? t('signingIn') : t('signIn')),
+              onClick: () => { void startLogin(site) },
+            }, loginState !== undefined
+              ? t('signingIn')
+              : t(site === 'intl' ? 'signInIntl' : 'signInCn'))),
           ),
           usagePrefs,
         ),
   )
 }
+
+/** The sites offered as sign-in buttons, in display order. */
+const SIGN_IN_SITES = ['cn', 'intl'] as const satisfies readonly CodeBuddySiteId[]
 
 /** Format a persisted cap for its input field; unset reads as empty ("use the meter's limit"). */
 function formatLimit(value: number | undefined): string {
@@ -584,7 +592,8 @@ const DICTS = {
     'notSignedIn': '未登录。',
     'expired': '登录已过期，请重新登录。',
     'waiting': '等待浏览器登录完成…',
-    'signIn': '登录',
+    'signInCn': '登录中国站',
+    'signInIntl': '登录国际站',
     'signingIn': '登录中…',
     'signOut': '退出登录',
     'timeout': '登录超时，请重试。',
@@ -615,7 +624,8 @@ const DICTS = {
     'notSignedIn': 'Not signed in.',
     'expired': 'Your session has expired. Please sign in again.',
     'waiting': 'Waiting for the browser sign-in to complete…',
-    'signIn': 'Sign in',
+    'signInCn': 'Sign in (China)',
+    'signInIntl': 'Sign in (Intl)',
     'signingIn': 'Signing in…',
     'signOut': 'Sign out',
     'timeout': 'Sign-in timed out. Please try again.',

@@ -39,9 +39,11 @@ import {
   DEFAULT_MAX_TOKENS,
   CODE_NO_QUOTA,
   CODE_NO_TEAM_QUOTA,
+  endpointOf,
 } from './constants.js'
 import { NotLoggedInError, SessionUnavailableError } from './session.js'
 import type { CodeBuddySession } from './session.js'
+import type { CodeBuddyIdentity } from './codebuddy.js'
 import { wordingKeys } from './locale.js'
 import { parseSse } from './sse.js'
 import type { AttachmentReader } from './serialize.js'
@@ -52,8 +54,8 @@ import type { CodeBuddyModel, WireError } from './types.js'
 
 /** Connection facts the registering plugin resolves and the adapter trusts. */
 export interface CodeBuddyConnectionOptions {
-  /** Chat endpoint base; `/chat/completions` is appended. */
-  baseURL: string
+  /** Chat endpoint base override; omit to follow the credential's site. */
+  baseURL?: string
   /** Context capacity used when the catalog does not size a model. */
   defaultContextWindow: number
   /** Per-request output cap used when the catalog does not cap a model. */
@@ -388,9 +390,13 @@ export class CodeBuddyAdapter extends LlmAdapter {
     // the identity freeze together, so a token refreshed mid-stream cannot be
     // paired with a different generation's endpoint.
     const connection = this.config.options()
+    // Resolved once: a concurrent login or logout between two resolutions could
+    // pair one site's host with the other site's token.
+    let identity: CodeBuddyIdentity
     let headers: Record<string, string>
     try {
-      headers = await this.config.session.authHeaders()
+      identity = await this.config.session.identity()
+      headers = await this.config.session.authHeaders(identity)
     } catch (error) {
       if (error instanceof NotLoggedInError) {
         throw new LlmError(error.message, 'MISSING_CREDENTIAL', { cause: error })
@@ -438,8 +444,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
     const payload = JSON.stringify(body)
 
     let response: Response
+    // The credential's site decides the host; an explicit `baseURL` wins.
+    const chatBase = connection.baseURL ?? `${endpointOf(identity.site)}/v2`
     try {
-      response = await fetch(`${connection.baseURL}/chat/completions`, {
+      response = await fetch(`${chatBase}/chat/completions`, {
         method: 'POST',
         headers: {
           ...headers,
@@ -460,7 +468,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
       // failed`; the endpoint and the chained cause are what make it
       // diagnosable.
       throw new LlmError(
-        `CodeBuddy request to ${connection.baseURL} failed`,
+        `CodeBuddy request to ${chatBase} failed`,
         'TRANSPORT',
         { cause: error },
       )

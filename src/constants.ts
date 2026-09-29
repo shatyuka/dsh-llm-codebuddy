@@ -14,21 +14,73 @@ export const CODEBUDDY_PROVIDER = 'codebuddy'
 /** Display name shown in model selectors and settings surfaces. */
 export const CODEBUDDY_DISPLAY_NAME = 'CodeBuddy'
 
-/** CodeBuddy service root; both the auth handshake and `/v3/config` live here. */
-export const CODEBUDDY_ENDPOINT = 'https://copilot.tencent.com'
+/**
+ * The CodeBuddy deployments this plugin can sign in to, by service root.
+ *
+ * The two hosts run the same service but hold *separate accounts*, so the
+ * site is picked at sign-in and recorded with the credential.
+ */
+export const CODEBUDDY_SITES = {
+  cn: 'https://copilot.tencent.com',
+  intl: 'https://www.codebuddy.ai',
+} as const
+
+/** One of the deployments in {@link CODEBUDDY_SITES}. */
+export type CodeBuddySiteId = keyof typeof CODEBUDDY_SITES
+
+/** The site assumed when a credential does not name one. */
+export const DEFAULT_SITE_ID: CodeBuddySiteId = 'cn'
 
 /**
- * OpenAI-compatible chat base. Only the chat wire route is compatible; the
- * model catalog at `/v3/config` is not, which is why this plugin owns its own
- * catalog reader instead of using an OpenAI `GET /models` listing.
+ * Whether a value names a known site.
+ *
+ * Site ids arrive from disk and over RPC, so an unknown one is possible.
+ * @param value - the candidate site id.
+ * @returns true when the value is a known site id.
  */
-export const CODEBUDDY_CHAT_BASE = `${CODEBUDDY_ENDPOINT}/v2`
+export function isSiteId(value: unknown): value is CodeBuddySiteId {
+  return typeof value === 'string' && Object.hasOwn(CODEBUDDY_SITES, value)
+}
+
+/**
+ * Resolve a value to a usable site, falling back to {@link DEFAULT_SITE_ID}.
+ * @param value - the candidate site id.
+ * @returns the value when known, otherwise the default site.
+ */
+export function resolveSite(value: unknown): CodeBuddySiteId {
+  return isSiteId(value) ? value : DEFAULT_SITE_ID
+}
+
+/**
+ * The service root for a site.
+ * @param site - the site id.
+ * @returns the endpoint origin, with no trailing slash.
+ */
+export function endpointOf(site: CodeBuddySiteId): string {
+  return CODEBUDDY_SITES[site]
+}
 
 /** Version this client reports to the service. */
 export const CODEBUDDY_IDE_VERSION = '4.12.0'
 
-/** User-agent this client sends. */
+/** The user-agent this client reports on the chat and meter planes. */
 export const CODEBUDDY_IDE_USER_AGENT = `CodeBuddyIDE/${CODEBUDDY_IDE_VERSION}`
+
+/** The WorkBuddy product's user-agent, for the international catalog read. */
+export const WORKBUDDY_USER_AGENT = 'WorkBuddy/5.7.2 CLI/2.156.0'
+
+/**
+ * The user-agent the catalog read reports.
+ *
+ * `/v3/config` keys its listing per product name: the international host
+ * serves its full list only to the CLI agent, every other context keeps the
+ * IDE agent.
+ * @param site - the site id.
+ * @returns the `User-Agent` header value for the catalog read.
+ */
+export function catalogUserAgentOf(site: CodeBuddySiteId): string {
+  return site === 'intl' ? WORKBUDDY_USER_AGENT : CODEBUDDY_IDE_USER_AGENT
+}
 
 /**
  * Context capacity assumed for a model the catalog does not describe at all.

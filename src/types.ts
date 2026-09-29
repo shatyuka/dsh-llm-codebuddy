@@ -114,6 +114,8 @@ export interface CodeBuddyModel {
 
 export interface CodeBuddyConfig {
   models: CodeBuddyModel[]
+  /** Declared agents; the `cli` agent's `models` is the offerable set. */
+  agents?: { name?: string, models?: string[] }[]
   /** Scheduled promotions that attach a badge and hover text to models. */
   modelPromotions?: CodeBuddyModelPromotion[]
 }
@@ -170,6 +172,21 @@ export interface CodeBuddyModelPromotion {
 }
 
 /**
+ * Normalize a catalog `credits` label to `xN` / `xN.NN`.
+ *
+ * The service occasionally ships decorated values (`"x0.34 credits"`), and
+ * those must not reach the picker verbatim. An unparseable or empty label
+ * reads as absent.
+ * @param credits - the raw catalog label.
+ * @returns the normalized `xN` label, or `undefined` when it carries no number.
+ */
+export function normalizeCredits(credits: string | undefined): string | undefined {
+  if (credits === undefined) return undefined
+  const match = /(\d+(?:\.\d+)?)/.exec(credits)
+  return match === null ? undefined : `x${match[1]}`
+}
+
+/**
  * Whether the catalog disclosed the capacities the harness requires.
  *
  * The harness needs a positive `contextWindow` and output cap for every model
@@ -184,6 +201,32 @@ export interface CodeBuddyModelPromotion {
 export function hasDisclosedCapacity(model: CodeBuddyModel): boolean {
   return model.maxAllowedSize !== undefined && model.maxAllowedSize > 0
     && model.maxOutputTokens !== undefined && model.maxOutputTokens > 0
+}
+
+/**
+ * The models the config's conversation agent names, in its declared order —
+ * the list the official clients offer, in that order. The `craft` agent is
+ * preferred, falling back to `cli`; only when neither names any model does
+ * the full catalog apply.
+ * @param config - the config read.
+ * @returns the whitelist by id, or `undefined` for every model.
+ */
+export function cliModels(config: CodeBuddyConfig): Map<string, CodeBuddyModel> | undefined {
+  const agents = [
+    config.agents?.find(agent => agent.name === 'craft'),
+    config.agents?.find(agent => agent.name === 'cli'),
+  ]
+  const declared = agents.filter((agent): agent is { name?: string, models: string[] } =>
+    agent?.models !== undefined && agent.models.length > 0)
+  const agent = declared[0]
+  if (agent === undefined) return undefined
+  const byId = new Map(config.models.map(model => [model.id, model]))
+  const offered = new Map<string, CodeBuddyModel>()
+  for (const id of agent.models) {
+    const model = byId.get(id)
+    if (model !== undefined && !offered.has(id)) offered.set(id, model)
+  }
+  return offered
 }
 
 /**

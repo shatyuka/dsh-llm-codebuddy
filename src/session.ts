@@ -18,6 +18,7 @@ import { fetchUsage } from './usage.js'
 import type { UsageSnapshot } from './usage.js'
 import { loadStorage, saveStorage } from './storage.js'
 import type { CodeBuddyStorage } from './storage.js'
+import { cliModels, normalizeCredits } from './types.js'
 import type { CodeBuddyModel, CodeBuddyModelPromotion } from './types.js'
 
 /** Refresh this long before the recorded expiry rather than exactly at it. */
@@ -201,6 +202,7 @@ export class CodeBuddySession {
       accessToken: storage.auth.accessToken,
       domain: storage.auth.domain,
       uid: storage.account.uid,
+      site: storage.site,
       ...storage.account.enterpriseId === undefined
         ? {}
         : { enterpriseId: storage.account.enterpriseId },
@@ -349,6 +351,7 @@ export class CodeBuddySession {
     }
     const refreshed = result.token
     const next: CodeBuddyStorage = {
+      site: storage.site,
       auth: {
         accessToken: refreshed.accessToken,
         expiresAt: Date.now() + refreshed.expiresIn * 1000,
@@ -377,10 +380,13 @@ export class CodeBuddySession {
 
   /**
    * The headers every authenticated CodeBuddy request carries.
+   * @param resolved - an already-resolved identity to build headers for; pass
+   *   one just resolved, so a concurrent login or logout cannot pair this
+   *   identity's site with the other credential's token.
    * @returns the identity headers, with the session refreshed if needed.
    */
-  async authHeaders(): Promise<Record<string, string>> {
-    const identity = await this.identity()
+  async authHeaders(resolved?: CodeBuddyIdentity): Promise<Record<string, string>> {
+    const identity = resolved ?? await this.identity()
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${identity.accessToken}`,
       'X-Domain': identity.domain,
@@ -461,8 +467,19 @@ export class CodeBuddySession {
       throw error
     }
     const models = config.models.filter(model => typeof model.id === 'string' && model.id.length > 0)
+    // The cli agent's list is the offerable set, in its declared order — the
+    // same order the official clients show. Without one, the full catalog.
+    const offeredByCli = cliModels(config)
+    const offered: CodeBuddyModel[] = (offeredByCli === undefined ? models : [...offeredByCli.values()])
+      .map(model => {
+        const credits = normalizeCredits(model.credits)
+        if (credits === model.credits) return model
+        return credits === undefined
+          ? (() => { const { credits: _omit, ...rest } = model; return rest })()
+          : { ...model, credits }
+      })
     const promotions = config.modelPromotions ?? []
-    const fingerprint = catalogFingerprint(models)
+    const fingerprint = catalogFingerprint(offered)
     // Compared against the last read ever, not just the live cache: a login as
     // a different account clears the cache, and the catalog it replaces still
     // has to be announced so the picker stops showing the previous account's
@@ -470,7 +487,7 @@ export class CodeBuddySession {
     // invalidate client-side.
     const changed = this.lastFingerprint !== undefined && this.lastFingerprint !== fingerprint
     this.lastFingerprint = fingerprint
-    this.catalog = { models, promotions, readAt: Date.now(), fingerprint }
+    this.catalog = { models: offered, promotions, readAt: Date.now(), fingerprint }
     // Announced on a microtask, never synchronously: this read's promise is
     // still the session's shared in-flight one, and a listener that reacted by
     // reading the catalog again would otherwise join a promise that cannot

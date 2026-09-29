@@ -15,7 +15,7 @@
  * @module dsh-llm-codebuddy/usage
  */
 
-import { CODEBUDDY_ENDPOINT, CODEBUDDY_IDE_USER_AGENT } from './constants.js'
+import { CODEBUDDY_IDE_USER_AGENT, endpointOf } from './constants.js'
 import type { CodeBuddyIdentity } from './codebuddy.js'
 
 /** One metering window: a named allowance and how much of it is spent. */
@@ -318,7 +318,7 @@ function todayRange(): { begin: string, end: string } {
  * non-2xx status, an unparseable body, or a non-zero service `code` all mean
  * "no usage shown" — never a broken sidebar foot.
  * @param identity - the signed-in identity, refreshed by the session.
- * @param path - the meter path under {@link CODEBUDDY_ENDPOINT}.
+ * @param path - the meter path under the identity's own site endpoint.
  * @param body - the JSON request body.
  * @param signal - optional cancellation.
  * @returns the parsed snapshot, or `undefined` when the plane was unreachable
@@ -332,7 +332,7 @@ async function postMeter(
 ): Promise<UsageSnapshot | undefined> {
   let response: Response
   try {
-    response = await fetch(`${CODEBUDDY_ENDPOINT}${path}`, {
+    response = await fetch(`${endpointOf(identity.site)}${path}`, {
       method: 'POST',
       headers: meterHeaders(identity),
       body,

@@ -15,9 +15,16 @@ import { promises as fs } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { resolveSite } from './constants.js'
+import type { CodeBuddySiteId } from './constants.js'
 
 /** The persisted shape; `auth` and `account` are always written together. */
 export interface CodeBuddyStorage {
+  /**
+   * The deployment this credential was issued by; a file predating sites has
+   * none and {@link loadStorage} fills in the default.
+   */
+  site: CodeBuddySiteId
   auth: {
     accessToken: string
     /** Absolute expiry in epoch ms. */
@@ -98,14 +105,17 @@ export async function loadStorage(): Promise<CodeBuddyStorage | undefined> {
   try {
     if (!(await isOwnerOnly(path))) return undefined
     const raw = await fs.readFile(path, 'utf-8')
-    const parsed = JSON.parse(raw) as CodeBuddyStorage | null
+    const parsed = JSON.parse(raw) as (Omit<CodeBuddyStorage, 'site'> & { site?: unknown }) | null
     if (parsed?.auth?.accessToken === undefined) return undefined
     if (parsed.account?.uid === undefined) return undefined
     // Self-heal storage written before empty-string normalization: an account
     // field that is an empty string reads as absent so the settings UI does not
     // render an empty row. A re-login rewrites the file, but this keeps an
     // existing credential usable without one.
-    return trimEmptyAccountFields(parsed)
+    return trimEmptyAccountFields({
+      ...parsed,
+      site: resolveSite(parsed.site),
+    })
   } catch {
     return undefined
   }
@@ -134,7 +144,7 @@ function trimEmptyAccountFields(storage: CodeBuddyStorage): CodeBuddyStorage {
     ...pick(a.enterpriseUserName) === undefined ? {} : { enterpriseUserName: a.enterpriseUserName },
     ...pick(a.departmentFullName) === undefined ? {} : { departmentFullName: a.departmentFullName },
   }
-  return { auth: storage.auth, account }
+  return { site: storage.site, auth: storage.auth, account }
 }
 
 /**

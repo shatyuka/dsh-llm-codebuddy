@@ -8,7 +8,7 @@
 
 ## 功能
 
-- **浏览器 OAuth 登录** — 在普通浏览器标签页中完成授权，全程无需 API Key。
+- **浏览器 OAuth 登录** — 在普通浏览器标签页中完成授权，全程无需 API Key；中国站与国际站均可登录。
 - **完整模型目录** — CodeBuddy 自带的模型，含上下文窗口、输出上限与积分倍率，服务端新增或下架模型会自动同步。
 - **流式对话** — 回复实时流式输出。
 - **工具调用** — 支持函数调用，模型不支持时会给出明确提示。
@@ -34,17 +34,22 @@ dsh plugin --profile web add @shatyuka/dsh-llm-codebuddy
 
 ## 登录
 
-在 Web UI 中打开 **设置 → CodeBuddy** 并点击 **登录**。浏览器登录页会在新标签页打开，harness 自动写入凭据，无需使用终端。
+在 Web UI 中打开 **设置 → CodeBuddy**，选择站点：**登录中国站**（[copilot.tencent.com](https://copilot.tencent.com)）或 **登录国际站**（[www.codebuddy.ai](https://www.codebuddy.ai)）。浏览器登录页会在新标签页打开，harness 自动写入凭据，无需使用终端。
+
+两个站点是同一服务部署在不同域名，但**账号互不通用**——一个站的账号无法在另一个站使用——因此站点在每次登录时选择，并随凭据一并记录，之后所有请求都会发往签发该凭据的站点。要换到另一个站，退出登录后重新登录即可。
 
 也可以从终端登录：
 
 ```bash
 # CLI 备用方式，推荐使用上方的 Web UI 登录。
 
-# 登录
+# 登录中国站（默认，等同 --site cn）
 dsh plugin --profile web exec dsh-codebuddy-login
 
-# 查看登录账号与模型列表
+# 登录国际站
+dsh plugin --profile web exec dsh-codebuddy-login --site intl
+
+# 查看登录账号、所属站点与模型列表
 dsh plugin --profile web exec dsh-codebuddy-login --status
 
 # 删除已保存的凭据
