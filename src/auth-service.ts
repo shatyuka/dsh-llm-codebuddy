@@ -425,6 +425,7 @@ export class CodeBuddyAuthService {
       nickname: stored.account.nickname,
       uid: stored.account.uid,
       ...stored.account.uin === undefined ? {} : { uin: stored.account.uin },
+      ...stored.auth.domain.length === 0 ? {} : { domain: stored.auth.domain },
       ...stored.account.enterpriseId === undefined ? {} : { enterpriseId: stored.account.enterpriseId },
       ...stored.account.enterpriseName === undefined ? {} : { enterpriseName: stored.account.enterpriseName },
       ...stored.account.enterpriseUserName === undefined ? {} : { enterpriseUserName: stored.account.enterpriseUserName },

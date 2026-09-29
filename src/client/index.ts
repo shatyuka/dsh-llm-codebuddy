@@ -137,6 +137,87 @@ function StatusRow({ label, value }: { label: string, value: string }): ReactEle
 }
 
 /**
+ * The always-visible first account row, doubling as the disclosure control.
+ *
+ * Collapsed it shows only the nickname; expanded it reveals the rest of the
+ * account facts. With nothing further to disclose it renders as a plain
+ * {@link StatusRow}, so a bare nickname carries no affordance that would open
+ * an empty panel.
+ */
+function AccountHeader({ label, value, expandable, open, onToggle }: {
+  label: string
+  value: string
+  expandable: boolean
+  open: boolean
+  onToggle: () => void
+}): ReactElement {
+  if (!expandable) return h(StatusRow, { label, value })
+  return h('button', {
+    type: 'button',
+    className: 'cb-accountHeader',
+    'aria-expanded': open,
+    onClick: onToggle,
+  },
+    h('span', { style: s.rowLabel }, label),
+    h('span', { style: s.rowValue }, value),
+    // Owning transform lives in the scoped CSS, so the rotation is a pure
+    // style concern and this stays a plain state attribute.
+    h('span', { className: 'cb-accountChevron', 'data-open': open ? 'true' : 'false' },
+      h(IconChevronDownOutlineMedium)),
+  )
+}
+
+/**
+ * The signed-in account block: the nickname alone until the row is clicked,
+ * then every fact the credential discloses.
+ *
+ * The disclosure state is owned here rather than by {@link CodeBuddySection}
+ * so a status refresh (or a sign-in replacing the account) resets it through
+ * the `key` the caller sets, and no stale expansion survives a different
+ * account.
+ */
+function AccountInfo({ status, t }: {
+  status: AuthStatus
+  t: Translate
+}): ReactElement {
+  const [open, setOpen] = useState<boolean>(false)
+
+  // Detail rows, in disclosure order: personal identity first, then the
+  // tenant facts the credential carries.
+  const details: ReactElement[] = []
+  if (status.uid !== undefined) details.push(h(StatusRow, { key: 'uid', label: t('uid'), value: status.uid }))
+  if (status.uin !== undefined) details.push(h(StatusRow, { key: 'uin', label: t('uin'), value: status.uin }))
+  if (status.domain !== undefined) details.push(h(StatusRow, { key: 'domain', label: t('domain'), value: status.domain }))
+  if (status.enterpriseName !== undefined) {
+    details.push(h(StatusRow, { key: 'enterprise', label: t('enterprise'), value: status.enterpriseName }))
+  }
+  if (status.enterpriseId !== undefined) {
+    details.push(h(StatusRow, { key: 'enterpriseId', label: t('enterpriseId'), value: status.enterpriseId }))
+  }
+  if (status.enterpriseUserName !== undefined) {
+    details.push(h(StatusRow, { key: 'enterpriseUser', label: t('enterpriseUser'), value: status.enterpriseUserName }))
+  }
+  if (status.departmentFullName !== undefined) {
+    details.push(h(StatusRow, {
+      key: 'department',
+      label: t('department'),
+      value: decodeDepartment(status.departmentFullName),
+    }))
+  }
+
+  return h(Fragment, null,
+    h(AccountHeader, {
+      label: t('nickname'),
+      value: status.nickname ?? '—',
+      expandable: details.length > 0,
+      open,
+      onToggle: () => { setOpen((v) => !v) },
+    }),
+    open ? h(Fragment, null, ...details) : null,
+  )
+}
+
+/**
  * Decode CodeBuddy's `departmentFullName`, which is base64-encoded UTF-8.
  * Falls back to the raw value if it is not valid base64.
  */
@@ -395,6 +476,9 @@ function CodeBuddySection({ rpc, t, prefs }: {
   }
 
   const signedIn = status?.loggedIn === true
+  // A signed-in status always carries the account fields; the fallback only
+  // settles the type for the branch below.
+  const account: AuthStatus = status ?? { loggedIn: true }
 
   // The usage preferences live in the Host settings document, so they are
   // configurable whether or not an account is signed in.
@@ -405,21 +489,13 @@ function CodeBuddySection({ rpc, t, prefs }: {
     error !== undefined ? h('p', { style: s.error }, error) : null,
     signedIn
       ? h('div', { style: s.status },
-          h(StatusRow, { label: t('nickname'), value: status?.nickname ?? '—' }),
-          status?.uid !== undefined ? h(StatusRow, { label: t('uid'), value: status.uid }) : null,
-          status?.uin !== undefined ? h(StatusRow, { label: t('uin'), value: status.uin }) : null,
-          status?.enterpriseName !== undefined
-            ? h(StatusRow, { label: t('enterprise'), value: status.enterpriseName })
-            : null,
-          status?.enterpriseId !== undefined
-            ? h(StatusRow, { label: t('enterpriseId'), value: status.enterpriseId })
-            : null,
-          status?.enterpriseUserName !== undefined
-            ? h(StatusRow, { label: t('enterpriseUser'), value: status.enterpriseUserName })
-            : null,
-          status?.departmentFullName !== undefined
-            ? h(StatusRow, { label: t('department'), value: decodeDepartment(status.departmentFullName) })
-            : null,
+          h(AccountInfo, {
+            // Keyed by the account so replacing it (a new sign-in) starts
+            // collapsed rather than inheriting the previous account's state.
+            key: account.uid ?? '',
+            status: account,
+            t,
+          }),
           h('div', { style: s.actions },
             h(Button, {
               variant: 'outline',
@@ -600,6 +676,7 @@ const DICTS = {
     'nickname': '昵称',
     'uid': 'UID',
     'uin': 'UIN',
+    'domain': '域名',
     'enterprise': '企业',
     'enterpriseId': '企业 ID',
     'enterpriseUser': '企业用户名',
@@ -632,6 +709,7 @@ const DICTS = {
     'nickname': 'Nickname',
     'uid': 'UID',
     'uin': 'UIN',
+    'domain': 'Domain',
     'enterprise': 'Enterprise',
     'enterpriseId': 'Enterprise ID',
     'enterpriseUser': 'Enterprise user',
@@ -696,6 +774,11 @@ const PREF_CSS = `
 .cb-prefSelector:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .cb-prefSelector:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .cb-prefInput{width:120px}
+.cb-accountHeader{display:flex;align-items:center;gap:12px;width:100%;padding:8px 0;border:none;border-bottom:1px solid var(--dsw-alias-border-l2);background:none;font:inherit;text-align:left;cursor:pointer}
+.cb-accountHeader:hover .cb-accountChevron{color:var(--dsw-alias-label-secondary)}
+.cb-accountHeader:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:6px}
+.cb-accountChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-tertiary);transition:transform 160ms ease,color 160ms ease}
+.cb-accountChevron[data-open="true"]{transform:rotate(180deg)}
 `
 const PREF_CSS_TAG = '@shatyuka/dsh-llm-codebuddy/pref.module.css'
 

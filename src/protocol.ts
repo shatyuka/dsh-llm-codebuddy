@@ -18,6 +18,7 @@ export interface CodeBuddyAuthStatus {
   nickname?: string
   uid?: string
   uin?: string
+  domain?: string
   enterpriseId?: string
   enterpriseName?: string
   enterpriseUserName?: string
