@@ -16,6 +16,7 @@
  */
 
 import { CODEBUDDY_IDE_USER_AGENT, endpointOf } from './constants.js'
+import { usedPercent } from './quota.js'
 import type { CodeBuddyIdentity } from './codebuddy.js'
 
 /** One metering window: a named allowance and how much of it is spent. */
@@ -24,9 +25,16 @@ export interface UsageWindow {
   name: string
   /** Amount already consumed; `undefined` when the plane does not report it. */
   used?: number
-  /** Total allowance for this window; `undefined` when uncapped. */
+  /**
+   * Total allowance for this window; `undefined` only when the plane disclosed
+   * no capacity at all. A disclosed `0` is a real budget of zero and is kept.
+   */
   limit?: number
-  /** Used as a percentage of `limit`, clamped to [0, 100]; `undefined` when `limit` is not positive. */
+  /**
+   * Used as a percentage of `limit`, clamped to [0, 100]. Present whenever a
+   * limit was disclosed; a zero budget has no headroom and so reads 100%.
+   * `undefined` only when no capacity was disclosed.
+   */
   usedPercent?: number
   /** ISO-ish timestamp the window resets at, when disclosed. */
   resetsAt?: string
@@ -41,7 +49,7 @@ export interface UsageSnapshot {
    *
    * Enterprise tenants report exactly one window. A personal account reports one
    * window per active package and draws down a base package plus any granted
-   * ones, so this carries the sum across every capped package rather than any
+   * ones, so this carries the sum across every metered package rather than any
    * single package's figures; `windows` keeps the per-package detail.
    */
   primary?: UsageWindow
@@ -90,6 +98,9 @@ function number(value: unknown, key: string): number | undefined {
   const raw = (value as Record<string, unknown>)[key]
   if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined
   if (typeof raw === 'string') {
+    // Blank means "not disclosed"; `Number('')` is 0, which would otherwise
+    // masquerade as a disclosed zero budget.
+    if (raw.trim().length === 0) return undefined
     const parsed = Number(raw)
     return Number.isFinite(parsed) ? parsed : undefined
   }
@@ -101,11 +112,6 @@ function string(value: unknown, key: string): string | undefined {
   if (value === null || typeof value !== 'object') return undefined
   const raw = (value as Record<string, unknown>)[key]
   return typeof raw === 'string' && raw.length > 0 ? raw : undefined
-}
-
-/** Used as a percentage of the limit, clamped to [0, 100]. */
-function percent(used: number, limit: number): number | undefined {
-  return limit > 0 ? Math.min(Math.max((used / limit) * 100, 0), 100) : undefined
 }
 
 /** Follow a chain of object keys through a JSON value, returning the leaf or undefined. */
@@ -176,9 +182,12 @@ function normalizeResetTime(raw: string): string {
  */
 function personalUsage(accounts: unknown[]): UsageSnapshot {
   const windows: UsageWindow[] = accounts.map((resource, index): UsageWindow => {
-    const limit = number(resource, 'CycleCapacitySizePrecise') ?? 0
+    // A package disclosing NO capacity is uncapped/unknown: it contributes only
+    // its name, so the affordance can say "no quota" instead of drawing a
+    // meaningless zero-of-zero. A disclosed zero is a real budget of zero, so
+    // the two are told apart by presence, not by value.
+    const disclosed = number(resource, 'CycleCapacitySizePrecise')
     const left = number(resource, 'CycleCapacityRemainPrecise') ?? 0
-    const used = Math.max(limit - left, 0)
     const name = string(resource, 'PackageCode')
       ?? string(resource, 'ResourceId')
       ?? `resource_${index}`
@@ -187,51 +196,47 @@ function personalUsage(accounts: unknown[]): UsageSnapshot {
     // bump it into the following `00:00:00`, which is the moment the quota
     // actually resets.
     const resetsAt = rawReset === undefined ? undefined : normalizeResetTime(rawReset)
-    // A capped window reports used/limit/percent together; an uncapped one
-    // reports only its name, so a single-bar affordance can show "no quota"
-    // rather than a meaningless zero-of-zero.
-    if (limit <= 0) {
+    if (disclosed === undefined) {
       return { name, ...resetsAt === undefined ? {} : { resetsAt } }
     }
-    const pct = percent(used, limit)
+    const limit = Math.max(disclosed, 0)
+    const used = Math.max(limit - left, 0)
     return {
       name,
       used,
       limit,
-      ...pct === undefined ? {} : { usedPercent: pct },
+      usedPercent: usedPercent(used, limit),
       ...resetsAt === undefined ? {} : { resetsAt },
     }
   })
-  // The single-bar affordance must reflect the account's whole allowance, not a
-  // single package: a personal account draws down a base package plus any number
-  // of grant/bonus packages, and `windows[0]` is only whichever package the
-  // service happens to list first. Surfacing that one alone reads 100% the
-  // moment the base package empties, while the granted credits that actually
-  // pay for the next request are still untouched. The aggregate sums every
-  // capped window, so the bar matches the total remaining the console reports.
-  type CappedWindow = UsageWindow & { used: number, limit: number }
-  const capped = windows.filter((window): window is CappedWindow =>
-    window.limit !== undefined && window.limit > 0 && window.used !== undefined)
-  if (capped.length === 0) {
+  // Aggregate rather than surfacing `windows[0]`: a personal account draws down
+  // a base package plus any granted ones, and the first listed package is
+  // arbitrary — showing it alone reads 100% once the base empties even though
+  // the grants that pay for the next request are untouched. Summing every
+  // window that disclosed a limit matches the total the console reports; an
+  // all-zero account totals zero and so reads 100%.
+  type MeteredWindow = UsageWindow & { used: number, limit: number }
+  const metered = windows.filter((window): window is MeteredWindow =>
+    window.limit !== undefined && window.used !== undefined)
+  if (metered.length === 0) {
     return { windows, ...windows.length > 0 ? { primary: windows[0] } : {} }
   }
-  const totalUsed = capped.reduce((sum, window) => sum + window.used, 0)
-  const totalLimit = capped.reduce((sum, window) => sum + window.limit, 0)
+  const totalUsed = metered.reduce((sum, window) => sum + window.used, 0)
+  const totalLimit = metered.reduce((sum, window) => sum + window.limit, 0)
   // A package's reset only matters while it still holds credits: a spent base
   // package resetting tomorrow must not mask the grant that expires in a month.
   // Once every package is spent there is nothing to fall back on but the
   // earliest reset overall, which is the one the account is waiting on.
-  const withHeadroom = capped.filter(window => window.limit - window.used > 0)
-  const resetsAt = (withHeadroom.length > 0 ? withHeadroom : capped)
+  const withHeadroom = metered.filter(window => window.limit - window.used > 0)
+  const resetsAt = (withHeadroom.length > 0 ? withHeadroom : metered)
     .map(window => window.resetsAt)
     .filter(value => value !== undefined)
     .sort()[0]
-  const pct = percent(totalUsed, totalLimit)
   const primary: UsageWindow = {
     name: 'total',
     used: totalUsed,
     limit: totalLimit,
-    ...pct === undefined ? {} : { usedPercent: pct },
+    usedPercent: usedPercent(totalUsed, totalLimit),
     ...resetsAt === undefined ? {} : { resetsAt },
   }
   return { windows, primary }
@@ -246,16 +251,18 @@ function personalUsage(accounts: unknown[]): UsageSnapshot {
  * @returns the assembled snapshot, or `undefined` when no limit was disclosed.
  */
 function enterpriseUsage(data: unknown): UsageSnapshot | undefined {
-  const limit = number(data, 'limitNum')
-  if (limit === undefined) return undefined
+  // An absent `limitNum` means no cap was disclosed; a present zero is a real
+  // budget of zero and is kept.
+  const disclosed = number(data, 'limitNum')
+  if (disclosed === undefined) return undefined
+  const limit = Math.max(disclosed, 0)
   const used = number(data, 'credit') ?? 0
   const reset = string(data, 'cycleResetTime')
-  const pct = percent(used, limit)
   const window: UsageWindow = {
     name: 'enterprise',
     used,
     limit,
-    ...pct === undefined ? {} : { usedPercent: pct },
+    usedPercent: usedPercent(used, limit),
     ...reset === undefined ? {} : { resetsAt: reset },
   }
   return { windows: [window], primary: window }

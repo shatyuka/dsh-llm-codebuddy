@@ -36,11 +36,22 @@ import type { ModelSelectT } from './model-select.js'
 import { createUsagePrefs, usePersistentPrefs, useUsagePrefs } from './usage-prefs.js'
 import type { UsagePrefs } from './usage-prefs.js'
 import {
+  creditsToUnit,
+  formatDraft,
+  formatInUnit,
+  unitMinimum,
+  unitToCredits,
+} from './units.js'
+import {
   CODEBUDDY_SETTINGS_NAMESPACE,
+  CREDIT_UNITS,
   CUSTOM_LIMIT_MIN,
   DANGER_PCT_MAX,
   DANGER_PCT_MIN,
+  isCreditUnit,
 } from '../settings.js'
+import type { CreditUnit } from '../settings.js'
+import { usedPercent } from '../quota.js'
 import { CODEBUDDY_AUTH_CHANNEL as AUTH_CHANNEL } from '../protocol.js'
 import type { CodeBuddySiteId } from '../constants.js'
 import type {
@@ -236,10 +247,18 @@ function describeError(result: RpcErr): string {
   return `${result.error.code}: ${result.error.message}`
 }
 
-/** Format a usage figure with up to one decimal place and thousands separators. */
-function formatAmount(value: number): string {
-  const rounded = Math.round(value * 10) / 10
-  return rounded.toLocaleString(undefined, { maximumFractionDigits: 1 })
+/** The symbol a unit renders with; credits carry none, matching the meter's own label. */
+function unitSymbol(unit: CreditUnit): string {
+  switch (unit) {
+    case 'usd': return '$'
+    case 'cny': return '¥'
+    case 'credit': return ''
+  }
+}
+
+/** Render one amount in `unit`, symbol included so a figure is never unit-less. */
+function amountInUnit(credits: number, unit: CreditUnit): string {
+  return `${unitSymbol(unit)}${formatInUnit(credits, unit)}`
 }
 
 /** Color for a usage fill, switching to danger once at or above the threshold. */
@@ -250,10 +269,15 @@ function usageColor(pct: number | undefined, dangerPct: number): string {
     : 'var(--dsw-alias-brand-primary, #3370ff)'
 }
 
-/** Build the tooltip text: the used/total figures plus an optional reset hint. */
-function usageTooltip(window: UsageWindow, t: Translate): string {
-  const used = window.used !== undefined ? formatAmount(window.used) : '—'
-  const total = window.limit !== undefined ? formatAmount(window.limit) : '—'
+/**
+ * Build the tooltip text: the used/total figures plus an optional reset hint.
+ *
+ * Both figures are credits from the meter; `unit` only decides how they are
+ * rendered, so the ratio the bar shows is identical whichever unit is picked.
+ */
+function usageTooltip(window: UsageWindow, t: Translate, unit: CreditUnit): string {
+  const used = window.used !== undefined ? amountInUnit(window.used, unit) : '—'
+  const total = window.limit !== undefined ? amountInUnit(window.limit, unit) : '—'
   // The bubble is `white-space: pre-line`, so a literal newline renders as a
   // line break. The first line names the provider so a glance knows what the
   // allowance belongs to, then the used/total figures, then the reset time.
@@ -276,7 +300,7 @@ function UsageIndicator({ rpc, t, wide, prefs }: {
 }): ReactElement | null {
   const [usage, setUsage] = useState<UsageResult | undefined>(undefined)
   // Shared preference store: a flip in the settings rows lands here directly.
-  const { showUsage, customLimit, dangerPct } = useUsagePrefs(prefs)
+  const { showUsage, customLimit, customLimitUnit, dangerPct } = useUsagePrefs(prefs)
 
   // Re-read usage immediately when a sign-in or sign-out completes, rather
   // than waiting for the next 60s polling tick.
@@ -317,21 +341,19 @@ function UsageIndicator({ rpc, t, wide, prefs }: {
   if (primary === undefined || primary.used === undefined || primary.limit === undefined) {
     return null
   }
-  // A custom cap overrides the meter's reported limit, so the percentage
-  // reflects a budget the user set.
+  // A custom cap overrides the meter's limit. Both figures are credits, so the
+  // ratio is unit-independent and only the tooltip's rendering follows `unit`.
+  // `??` is deliberate: a zero cap is a real budget, not a missing one.
   const limit = customLimit ?? primary.limit
-  const usedPct = limit > 0
-    ? Math.min(Math.max((primary.used / limit) * 100, 0), 100)
-    : undefined
-  const pct = usedPct ?? 0
+  const pct = usedPercent(primary.used, limit)
   const derived: UsageWindow = {
     name: primary.name,
     used: primary.used,
     limit,
-    ...usedPct === undefined ? {} : { usedPercent: usedPct },
+    usedPercent: pct,
     ...primary.resetsAt === undefined ? {} : { resetsAt: primary.resetsAt },
   }
-  const label = usageTooltip(derived, t)
+  const label = usageTooltip(derived, t, customLimitUnit)
   const color = usageColor(derived.usedPercent, dangerPct)
 
   if (wide) {
@@ -655,29 +677,43 @@ function CodeBuddySection({ rpc, t, prefs }: {
 /** The sites offered as sign-in buttons, in display order. */
 const SIGN_IN_SITES = ['cn', 'intl'] as const satisfies readonly CodeBuddySiteId[]
 
-/** Format a persisted cap for its input field; unset reads as empty ("use the meter's limit"). */
-function formatLimit(value: number | undefined): string {
-  return value === undefined ? '' : String(value)
+/**
+ * Format a persisted cap for its input field, expressed in `unit`; an unset
+ * cap reads as empty ("use the meter's limit").
+ */
+function formatLimit(value: number | undefined, unit: CreditUnit): string {
+  return value === undefined ? '' : formatDraft(creditsToUnit(value, unit), unit)
 }
 
 /**
- * The three usage-preference rows. Self-contained: they read the shared store
- * and keep their own drafts, so a keystroke re-renders this component only,
- * and each draft re-syncs only when its own persisted value moves.
+ * The usage-preference rows. Self-contained: they read the shared store and
+ * keep their own drafts, so a keystroke re-renders this component only, and
+ * each draft re-syncs only when its own persisted value moves.
  */
 function UsagePrefRows({ t, prefs }: {
   t: Translate
   prefs: UsagePrefs
 }): ReactElement {
-  const { showUsage, customLimit, dangerPct } = useUsagePrefs(prefs)
+  const { showUsage, customLimit, customLimitUnit, dangerPct } = useUsagePrefs(prefs)
   const [menuOpen, setMenuOpen] = useState<boolean>(false)
-  const [limitText, setLimitText] = useState<string>(() => formatLimit(customLimit))
+  const [unitMenuOpen, setUnitMenuOpen] = useState<boolean>(false)
+  // The draft is text in the SELECTED unit; the store's `customLimit` is always
+  // credits, so every read converts out and every write converts back.
+  const [limitText, setLimitText] = useState<string>(() => formatLimit(customLimit, customLimitUnit))
   const [dangerText, setDangerText] = useState<string>(() => String(dangerPct))
   // Own subscription: the flag flips on scope snapshots, not value changes.
   const persistent = usePersistentPrefs(prefs)
 
-  useEffect(() => { setLimitText(formatLimit(customLimit)) }, [customLimit])
+  // The unit is a dependency too: switching units re-renders the SAME cap, so
+  // the field must be reformatted rather than left holding the old figure.
+  useEffect(() => {
+    setLimitText(formatLimit(customLimit, customLimitUnit))
+  }, [customLimit, customLimitUnit])
   useEffect(() => { setDangerText(String(dangerPct)) }, [dangerPct])
+
+  const unitLabel = (unit: CreditUnit): string => t(unit === 'credit'
+    ? 'unitCredit'
+    : unit === 'cny' ? 'unitCny' : 'unitUsd')
 
   return h(Fragment, null,
     // Non-loopback Host: the settings transport stays process-local, so edits
@@ -717,35 +753,81 @@ function UsagePrefRows({ t, prefs }: {
         ),
       }),
     ),
-    // Custom quota cap: overrides the meter's reported limit so the percentage
-    // reflects a budget the user set. Empty clears the field, so the section
-    // re-inherits the schema default and the meter's own total is used again.
+    // Custom quota cap: overrides the meter's reported limit. The amount is
+    // typed in the selected unit and converted to credits here, the only unit
+    // the Host stores. Empty clears it, re-inheriting the meter's own total.
     h('div', { className: 'cb-prefRow' },
       h('div', { className: 'cb-prefRowText' },
         h('div', { className: 'cb-prefTitle' }, t('customLimit')),
         h('div', { className: 'cb-prefDesc' }, t('customLimitDesc')),
       ),
-      h(Input, {
-        type: 'number',
-        inputMode: 'numeric',
-        min: CUSTOM_LIMIT_MIN,
-        step: 1,
-        placeholder: t('customLimitPlaceholder'),
-        className: 'cb-prefInput',
-        value: limitText,
-        onChange: (e: ChangeEvent<HTMLInputElement>) => { setLimitText(e.currentTarget.value) },
-        onBlur: () => {
-          const parsed = Number(limitText)
-          if (limitText.length === 0 || !Number.isFinite(parsed) || parsed < CUSTOM_LIMIT_MIN) {
-            prefs.setCustomLimit(undefined)
-            // Reset the draft directly: a no-op publish (value already unset)
-            // never fires the adoption subscription.
-            setLimitText(formatLimit(customLimit))
-          } else {
-            prefs.setCustomLimit(parsed)
-          }
-        },
-      }),
+      h('div', { className: 'cb-prefControl' },
+        h(Input, {
+          type: 'number',
+          inputMode: 'decimal',
+          // The bound follows the unit. The credit floor is zero, so the
+          // currency floor is zero too — only a negative amount is refused.
+          min: unitMinimum(customLimitUnit, CUSTOM_LIMIT_MIN),
+          // A credit cap need not be whole: one entered as a currency is stored
+          // at four-decimal credit precision (¥10 is 142.8571), which a fixed
+          // step would flag as invalid. `any` still steps by one on arrow keys.
+          step: customLimitUnit === 'credit' ? 'any' : 0.01,
+          placeholder: t('customLimitPlaceholder'),
+          className: 'cb-prefInput',
+          value: limitText,
+          onChange: (e: ChangeEvent<HTMLInputElement>) => { setLimitText(e.currentTarget.value) },
+          onBlur: () => {
+            // Compare TEXT, not a re-parsed figure: the currency view is lossy
+            // (¥10 is 142.8571 credits, shown as $1.43), so reading the rounded
+            // text back would drift the stored budget on every focus/blur or
+            // unit switch. An unchanged field means there was no edit.
+            const shown = formatLimit(customLimit, customLimitUnit)
+            if (limitText === shown) return
+            const parsed = Number(limitText)
+            // Empty means "follow the meter"; anything else is judged as its
+            // CREDIT equivalent. Zero is a real budget and is kept.
+            const credits = limitText.length === 0 || !Number.isFinite(parsed)
+              ? undefined
+              : unitToCredits(parsed, customLimitUnit)
+            if (credits === undefined || credits < CUSTOM_LIMIT_MIN) {
+              prefs.setCustomLimit(undefined)
+              // A no-op publish never fires the adoption subscription, so the
+              // draft is reset directly.
+              setLimitText(formatLimit(undefined, customLimitUnit))
+              return
+            }
+            prefs.setCustomLimit(credits)
+            // Echo what the Host will hold, so a currency draft does not keep
+            // more precision than was actually stored.
+            setLimitText(formatLimit(credits, customLimitUnit))
+          },
+        }),
+        // Unit selector: the same dropdown affordance as the row above.
+        h(Menu, {
+          open: unitMenuOpen,
+          onClose: () => { setUnitMenuOpen(false) },
+          items: CREDIT_UNITS.map(unit => ({ id: unit, label: unitLabel(unit) })),
+          selectedId: customLimitUnit,
+          onSelect: (id: string) => {
+            setUnitMenuOpen(false)
+            // The store only accepts the closed unit set, so an id that is not
+            // one of them (impossible from this list) is simply ignored.
+            if (isCreditUnit(id)) prefs.setCustomLimitUnit(id)
+          },
+          align: 'end',
+          portal: true,
+          anchor: h('button', {
+            type: 'button',
+            className: 'cb-prefSelector',
+            'aria-haspopup': 'menu',
+            'aria-expanded': unitMenuOpen,
+            'aria-label': t('customLimitUnit'),
+            onClick: () => { setUnitMenuOpen((v) => !v) },
+          }, unitLabel(customLimitUnit),
+            h(IconChevronDownOutlineMedium),
+          ),
+        }),
+      ),
     ),
     // Danger threshold: above this used-percentage the fill turns red.
     h('div', { className: 'cb-prefRow' },
@@ -811,6 +893,10 @@ const DICTS = {
     'customLimit': '自定义额度上限',
     'customLimitDesc': '覆盖服务端上报的总量，按此值计算已用百分比。留空则使用服务端总量。',
     'customLimitPlaceholder': '使用默认',
+    'customLimitUnit': '额度单位',
+    'unitCredit': '积分',
+    'unitCny': '人民币',
+    'unitUsd': '美元',
     'dangerPct': '余量告警百分比',
     'dangerPctDesc': '已用百分比达到此值时，进度条变为红色提醒。默认 90%。',
     'usageUsed': '已用额度',
@@ -845,6 +931,10 @@ const DICTS = {
     'customLimit': 'Custom quota cap',
     'customLimitDesc': 'Overrides the server-reported limit when computing the used percentage. Leave empty to use the server value.',
     'customLimitPlaceholder': 'Default',
+    'customLimitUnit': 'Quota unit',
+    'unitCredit': 'Credits',
+    'unitCny': 'CNY',
+    'unitUsd': 'USD',
     'dangerPct': 'Low-allowance alert',
     'dangerPctDesc': 'The fill turns red once used usage reaches this percentage. Defaults to 90%.',
     'usageUsed': 'Usage',
@@ -897,6 +987,7 @@ const PREF_CSS = `
 .cb-prefSelector:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .cb-prefSelector:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .cb-prefInput{width:120px}
+.cb-prefControl{display:flex;align-items:center;gap:8px;flex:none}
 .cb-accountHeader{display:flex;align-items:center;gap:12px;width:100%;padding:8px 0;border:none;border-bottom:1px solid var(--dsw-alias-border-l2);background:none;font:inherit;text-align:left;cursor:pointer}
 .cb-accountHeader:hover .cb-accountChevron{color:var(--dsw-alias-label-secondary)}
 .cb-accountHeader:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:6px}
