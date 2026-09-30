@@ -144,6 +144,7 @@ export async function getLoginAccount(
   state: string,
   accessToken: string,
   domain: string,
+  signal?: AbortSignal,
 ): Promise<Account> {
   const response = await fetch(
     `${endpointOf(site)}/v2/plugin/login/account?state=${encodeURIComponent(state)}`,
@@ -156,6 +157,7 @@ export async function getLoginAccount(
         'X-No-Enterprise-Id': 'true',
         'X-Domain': domain,
       },
+      ...signal === undefined ? {} : { signal },
     },
   )
   if (!response.ok) {

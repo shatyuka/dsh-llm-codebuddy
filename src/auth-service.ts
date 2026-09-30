@@ -2,10 +2,11 @@
  * Host-side OAuth service exposed to the Web client over a private RPC channel.
  *
  * The browser login is long-running (it waits for a human to finish signing
- * in), so it is split across two RPC endpoints: `startLogin` mints the
- * handshake and returns the URL the user must open, and `pollLogin` checks
- * whether that handshake has completed. `status` and `logout` are the
- * read/clear pair the settings page drives the rest of the time.
+ * in), so it is split across RPC endpoints: `startLogin` mints the handshake
+ * and returns the URL the user must open, `pollLogin` checks whether that
+ * handshake has completed, and `cancelLogin` releases one the user abandoned
+ * before it commits a credential. `status` and `logout` are the read/clear
+ * pair the settings page drives the rest of the time.
  *
  * The channel is registered through `ctx.connection.rpc.handle` when the host
  * allows it; on dsh 0.1.5-rc.1 that path throws (see the constructor), so an
@@ -57,6 +58,7 @@ export type {
 /** One in-flight browser-login handshake, keyed by its own state. */
 interface PendingLogin {
   state: string
+  controller: AbortController
   /** Resolves to the persisted storage once `pollAuthToken` succeeds. */
   promise: Promise<CodeBuddyStorage | undefined>
 }
@@ -243,10 +245,12 @@ interface NodeServerResponse {
 /**
  * The CodeBuddy auth RPC service.
  *
- * A handshake is started by `startLogin`, polled to completion by `pollLogin`,
- * and its credential is picked up by the adapter's `CodeBuddySession` on its
- * next request — so a login completed through the UI reaches a running harness
- * without a restart. `logout` clears the file and invalidates the session cache.
+ * A handshake is started by `startLogin`, polled to completion by `pollLogin`
+ * (or released early by `cancelLogin`), and its credential is picked up by the
+ * adapter's `CodeBuddySession` on its next request — so a login completed
+ * through the UI reaches a running harness without a restart. `logout` cancels
+ * any in-flight handshake first, then clears the file and invalidates the
+ * session cache.
  */
 export class CodeBuddyAuthService {
   /** In-flight handshakes by state id. */
@@ -386,6 +390,12 @@ export class CodeBuddyAuthService {
           : ''
         return ok(await this.pollLogin(state))
       }
+      case 'cancelLogin': {
+        const state = typeof payload === 'object' && payload !== null && 'state' in payload
+          ? String((payload as { state: unknown }).state)
+          : ''
+        return ok(await this.cancelLogin(state))
+      }
       case 'logout': return ok(await this.logout())
       case 'usage': return ok(await this.usage())
       case 'models': return ok(await this.models())
@@ -440,9 +450,11 @@ export class CodeBuddyAuthService {
    */
   async startLogin(site: CodeBuddySiteId): Promise<CodeBuddyLoginStart> {
     const handshake = await requestAuthState(site)
+    const controller = new AbortController()
     const pending: PendingLogin = {
       state: handshake.state,
-      promise: this.runLogin(site, handshake.state),
+      controller,
+      promise: this.runLogin(site, handshake.state, controller.signal),
     }
     this.pending.set(handshake.state, pending)
     // Reap the entry once the handshake settles either way, so the table does
@@ -474,8 +486,39 @@ export class CodeBuddyAuthService {
     }
   }
 
+  /**
+   * Cancel a started browser-login handshake.
+   *
+   * The entry is dropped first so no later `pollLogin` attaches to it, and the
+   * run is awaited rather than merely signalled: `abort()` only requests
+   * cancellation, so returning early would report a cancel while the run may
+   * still be writing a credential.
+   * @param state - the handshake id from `startLogin`.
+   */
+  async cancelLogin(state: string): Promise<void> {
+    const pending = this.pending.get(state)
+    if (pending === undefined) return
+    this.pending.delete(state)
+    pending.controller.abort()
+    await pending.promise
+  }
+
+  /**
+   * Cancel every in-flight handshake and await them all.
+   *
+   * `logout` needs this: a run still in flight would otherwise persist its
+   * credential *after* the store was cleared.
+   */
+  private async cancelAllLogins(): Promise<void> {
+    const pending = [...this.pending.values()]
+    this.pending.clear()
+    for (const entry of pending) entry.controller.abort()
+    await Promise.all(pending.map(entry => entry.promise))
+  }
+
   /** Remove the stored credential. */
   async logout(): Promise<void> {
+    await this.cancelAllLogins()
     await clearStorage()
     // Drop the in-memory cache so the next request re-reads disk (finds
     // nothing) instead of serving the now-revoked token.
@@ -545,12 +588,20 @@ export class CodeBuddyAuthService {
    * Reuses `buildStorage` so the on-disk shape is identical to the CLI login.
    * Returns `undefined` on any failure so the client's poll resolves
    * `done: false` and may retry from `startLogin`.
+   *
+   * The signal cancels the in-flight reads, narrowing the window in which a
+   * cancel can still commit: an abort that lands after the check below cannot
+   * stop the write, so the closing guarantee is not this check but the callers
+   * — `cancelLogin` and `logout` await this run before reporting, and the
+   * client re-reads `status` rather than assuming the cancel won.
    */
-  private async runLogin(site: CodeBuddySiteId, state: string): Promise<CodeBuddyStorage | undefined> {
+  private async runLogin(site: CodeBuddySiteId, state: string, signal: AbortSignal): Promise<CodeBuddyStorage | undefined> {
     try {
-      const token = await pollAuthToken(site, state)
+      const token = await pollAuthToken(site, state, signal)
       if (token === undefined) return undefined
-      const account = await getLoginAccount(site, state, token.accessToken, token.domain)
+      const account = await getLoginAccount(site, state, token.accessToken, token.domain, signal)
+      // Last chance to drop a cancelled attempt before anything is persisted.
+      if (signal.aborted) return undefined
       const storage = buildStorage(site, token, account)
       await saveStorage(storage)
       // Drop the in-memory cache so the next request picks up the freshly

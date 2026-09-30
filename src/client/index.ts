@@ -23,7 +23,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-api-session-controller/client'
-import { useState, useEffect, useCallback, createElement as h, Fragment, type ChangeEvent, type HTMLAttributes, type ReactElement } from 'react'
+import { useState, useEffect, useCallback, useRef, createElement as h, Fragment, type ChangeEvent, type HTMLAttributes, type ReactElement } from 'react'
 import {
   Button,
   Tooltip,
@@ -403,15 +403,32 @@ function CodeBuddySection({ rpc, t, prefs }: {
   const [status, setStatus] = useState<AuthStatus | undefined>(undefined)
   const [error, setError] = useState<string | undefined>(undefined)
   const [loginState, setLoginState] = useState<string | undefined>(undefined)
+  const [loginSite, setLoginSite] = useState<CodeBuddySiteId | undefined>(undefined)
+  /** A `startLogin` round trip is in flight; guards against a double start. */
+  const starting = useRef<boolean>(false)
 
-  const refresh = useCallback(async () => {
-    const result = await rpc.call('status', {})
-    if (result.ok) {
+  /**
+   * Re-read the auth status and apply it.
+   *
+   * Never rejects: the transport reports a broken request by rejecting, and
+   * every caller is a lifecycle step that must reach its own transition.
+   * @returns the status that was applied, or undefined when the read failed.
+   */
+  const refresh = useCallback(async (): Promise<AuthStatus | undefined> => {
+    try {
+      const result = await rpc.call('status', {})
+      if (!result.ok) {
+        setError(describeError(result))
+        setPhase('error')
+        return undefined
+      }
       setStatus(result.value)
       setPhase('idle')
-    } else {
-      setError(describeError(result))
+      return result.value
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error))
       setPhase('error')
+      return undefined
     }
   }, [rpc])
 
@@ -420,48 +437,147 @@ function CodeBuddySection({ rpc, t, prefs }: {
     void refresh()
   }, [refresh])
 
+  /**
+   * Release one Host handshake, returning the failure text when the Host
+   * refused it. Cancelling an unknown or already reaped state is a no-op, so a
+   * stale state is not an error.
+   */
+  const cancelHandshake = useCallback(async (state: string): Promise<string | undefined> => {
+    try {
+      const result = await rpc.call('cancelLogin', { state })
+      return result.ok ? undefined : describeError(result)
+    } catch (error) {
+      // Reported rather than thrown: both callers must still reach their own
+      // state transition.
+      return error instanceof Error ? error.message : String(error)
+    }
+  }, [rpc])
+
   // Poll an in-flight login until it completes or the deadline passes.
   useEffect(() => {
     if (loginState === undefined) return
     const startedAt = Date.now()
     let stopped = false
+
+    /**
+     * Abandon the attempt: release the Host handshake, then report the timeout.
+     * The Host polls on its own schedule, so a handshake this page walked away
+     * from would otherwise keep running — and could still persist a credential.
+     */
+    const giveUp = async (): Promise<void> => {
+      // Every await precedes clearing `loginState`: that teardown sets
+      // `stopped`, so a guard after it would skip the timeout message.
+      await cancelHandshake(loginState)
+      if (stopped) return
+      // The run may have committed its credential just before the abort landed,
+      // so re-read the status rather than reporting a timeout for a real login.
+      const current = await refresh()
+      if (stopped) return
+      setLoginState(undefined)
+      setLoginSite(undefined)
+      if (current?.loggedIn === true) {
+        emitLoginChange()
+        return
+      }
+      setError(t('timeout'))
+      setPhase('error')
+    }
+
     const tick = async (): Promise<void> => {
       if (stopped) return
-      const result = await rpc.call('pollLogin', { state: loginState })
+      // The transport rejects on a broken request. Swallowing it keeps the loop
+      // — and the deadline below — alive, so one bad round trip cannot wedge
+      // the page on "Signing in…" with every button disabled.
+      let result: Awaited<ReturnType<typeof rpc.call<'pollLogin'>>> | undefined
+      try {
+        result = await rpc.call('pollLogin', { state: loginState })
+      } catch {
+        result = undefined
+      }
       if (stopped) return
-      if (result.ok && result.value.done) {
+      if (result?.ok === true && result.value.done) {
         setLoginState(undefined)
+        setLoginSite(undefined)
         await refresh()
         emitLoginChange()
         return
       }
       if (Date.now() - startedAt >= POLL_DEADLINE_MS) {
-        setLoginState(undefined)
-        setError(t('timeout'))
-        setPhase('error')
+        await giveUp()
         return
       }
       window.setTimeout(tick, POLL_INTERVAL_MS)
     }
     void tick()
+    // Unmount deliberately does NOT cancel the Host handshake: closing the
+    // settings panel while the browser login is still open is a normal way to
+    // finish signing in, and the credential is worth keeping. Unmounting stops
+    // this page from watching, so the run is left to its own Host-side timeout
+    // — only the deadline path above releases it.
     return () => { stopped = true }
-  }, [loginState, rpc, refresh])
+  }, [loginState, rpc, refresh, cancelHandshake, t])
 
   const startLogin = useCallback(async (site: CodeBuddySiteId) => {
+    // A guard, not the `disabled` prop: that only takes effect once the state
+    // below is committed, so two clicks in the same tick would each start a
+    // Host handshake and orphan the first one.
+    if (starting.current) return
+    starting.current = true
     setError(undefined)
-    const result = await rpc.call('startLogin', { site })
-    if (!result.ok) {
-      setError(describeError(result))
+    try {
+      let result: Awaited<ReturnType<typeof rpc.call<'startLogin'>>>
+      try {
+        result = await rpc.call('startLogin', { site })
+      } catch (error) {
+        // A rejected transport must not become an unhandled rejection that
+        // leaves the page looking idle with no sign-in in flight.
+        setError(error instanceof Error ? error.message : String(error))
+        setPhase('error')
+        return
+      }
+      if (!result.ok) {
+        setError(describeError(result))
+        setPhase('error')
+        return
+      }
+      // Open the login page in a new tab; the host polls the handshake.
+      window.open(result.value.authUrl, '_blank', 'noopener')
+      setLoginSite(site)
+      setLoginState(result.value.state)
+    } finally {
+      starting.current = false
+    }
+  }, [rpc])
+
+  const cancelLogin = useCallback(async () => {
+    const state = loginState
+    if (state === undefined) return
+    const failure = await cancelHandshake(state)
+    if (failure !== undefined) {
+      setError(failure)
       setPhase('error')
       return
     }
-    // Open the login page in a new tab; the host polls the handshake.
-    window.open(result.value.authUrl, '_blank', 'noopener')
-    setLoginState(result.value.state)
-  }, [rpc])
+    setLoginState(undefined)
+    setLoginSite(undefined)
+    // The credential may have landed just before the abort; re-read so a real
+    // sign-in is not shown as signed out.
+    const current = await refresh()
+    // The sidebar indicator polls on its own 60s schedule, so a cancelled
+    // attempt that did commit a credential must be announced — otherwise a real
+    // sign-in would not reach the usage bar until that next tick.
+    if (current?.loggedIn === true) emitLoginChange()
+  }, [cancelHandshake, loginState, refresh])
 
   const logout = useCallback(async () => {
-    const result = await rpc.call('logout', {})
+    let result: Awaited<ReturnType<typeof rpc.call<'logout'>>>
+    try {
+      result = await rpc.call('logout', {})
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error))
+      setPhase('error')
+      return
+    }
     if (result.ok) {
       setStatus({ loggedIn: false })
       emitLoginChange()
@@ -522,9 +638,14 @@ function CodeBuddySection({ rpc, t, prefs }: {
               size: 'md',
               disabled: loginState !== undefined,
               onClick: () => { void startLogin(site) },
-            }, loginState !== undefined
+            }, loginSite === site
               ? t('signingIn')
               : t(site === 'intl' ? 'signInIntl' : 'signInCn'))),
+            loginState !== undefined ? h(Button, {
+              variant: 'outline',
+              size: 'md',
+              onClick: () => { void cancelLogin() },
+            }, t('cancel')) : null,
           ),
           usagePrefs,
         ),
@@ -671,6 +792,7 @@ const DICTS = {
     'signInCn': '登录中国站',
     'signInIntl': '登录国际站',
     'signingIn': '登录中…',
+    'cancel': '取消',
     'signOut': '退出登录',
     'timeout': '登录超时，请重试。',
     'nickname': '昵称',
@@ -704,6 +826,7 @@ const DICTS = {
     'signInCn': 'Sign in (China)',
     'signInIntl': 'Sign in (Intl)',
     'signingIn': 'Signing in…',
+    'cancel': 'Cancel',
     'signOut': 'Sign out',
     'timeout': 'Sign-in timed out. Please try again.',
     'nickname': 'Nickname',

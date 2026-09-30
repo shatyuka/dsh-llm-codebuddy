@@ -115,7 +115,7 @@ export async function login(hooks: LoginHooks = {}, signal?: AbortSignal): Promi
     throw new Error('CodeBuddy sign-in did not complete (it was refused, or it timed out).')
   }
 
-  const account = await getLoginAccount(site, state.state, token.accessToken, token.domain)
+  const account = await getLoginAccount(site, state.state, token.accessToken, token.domain, signal)
 
   const storage = buildStorage(site, token, account)
   await saveStorage(storage)

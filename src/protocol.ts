@@ -82,6 +82,7 @@ export interface CodeBuddyRpcMap {
   status: { request: Record<string, never>, response: CodeBuddyAuthStatus }
   startLogin: { request: { site: CodeBuddySiteId }, response: CodeBuddyLoginStart }
   pollLogin: { request: { state: string }, response: CodeBuddyLoginPoll }
+  cancelLogin: { request: { state: string }, response: void }
   logout: { request: Record<string, never>, response: void }
   usage: { request: Record<string, never>, response: CodeBuddyUsageResult }
   models: { request: Record<string, never>, response: CodeBuddyModelsResult }
