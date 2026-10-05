@@ -224,9 +224,9 @@ function userContent(parts: readonly WireContentPart[]): string | WireContentPar
 /**
  * Serialize the projected conversation in order.
  *
- * The service honors image content only in the final user message, so image
- * parts from earlier turns forward into the last one — including images
- * inside tool results, whose wire entries accept string content only.
+ * Tool results remain `role: 'tool'` messages, including their image parts.
+ * Earlier user images forward into the last user message for compatibility
+ * with services that only honor image content there.
  * @param messages - the projected conversation (no offloaded occurrences).
  * @param supportsImages - whether the selected model declared image input.
  * @param images - request versions for every image reference, keyed by id.
@@ -258,15 +258,14 @@ export function serializeMessages(
     }
     if (message.role === 'tool') {
       const resultParts = contentParts(message.content, images)
-      const imagePartsOfResult = resultParts.filter(part => part.type === 'image_url')
       wire.push({
         role: 'tool',
         tool_call_id: message.toolCallId as unknown as string,
         // Empty output still needs some content on the wire.
-        content: flattenText(message.content) || '(no output)',
+        content: resultParts.some(part => part.type === 'image_url')
+          ? resultParts
+          : flattenText(message.content) || '(no output)',
       })
-      // Tool entries take string content only; their images forward instead.
-      forwarded.push(...imagePartsOfResult)
       continue
     }
     if (message.role !== 'user') {
