@@ -70,6 +70,12 @@ pnpm run build
 
 This compiles the host half with `tsc` and bundles the Web client half with `esbuild`, both into `lib/`.
 
+## Test
+
+```bash
+pnpm test
+```
+
 ## License
 
 MIT

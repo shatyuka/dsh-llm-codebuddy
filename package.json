@@ -37,6 +37,7 @@
     "README.zh.md",
     "LICENSE"
   ],
+  "packageManager": "pnpm@11.28.5",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
@@ -58,9 +59,11 @@
     "build": "npm run build:host && npm run build:client && chmod +x lib/cli/login.js",
     "build:host": "tsc -p tsconfig.json",
     "build:client": "npm run typecheck:client && node build-client.mjs",
-    "typecheck": "npm run typecheck:host && npm run typecheck:client",
+    "typecheck": "npm run typecheck:host && npm run typecheck:client && npm run typecheck:test",
     "typecheck:host": "tsc -p tsconfig.json --noEmit",
     "typecheck:client": "tsc -p tsconfig.client.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
     "login": "node lib/cli/login.js"
   },
   "bin": {
@@ -103,8 +106,10 @@
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.0",
     "esbuild": "^0.25.0",
+    "pnpm": "11.28.5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.12"
   }
 }

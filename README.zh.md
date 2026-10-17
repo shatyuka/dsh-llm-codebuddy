@@ -70,6 +70,12 @@ pnpm run build
 
 该命令使用 `tsc` 编译宿主端，使用 `esbuild` 打包 Web 客户端，两者均输出到 `lib/`。
 
+## 测试
+
+```bash
+pnpm test
+```
+
 ## 许可证
 
 MIT
