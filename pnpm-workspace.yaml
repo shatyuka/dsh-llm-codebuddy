@@ -3,3 +3,6 @@ allowBuilds:
 
 onlyBuiltDependencies:
   - esbuild
+
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/*'
