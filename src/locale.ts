@@ -40,14 +40,20 @@ export function prefersChinese(language: string | undefined): boolean {
 /**
  * The `displayMsg` keys one tag may name, best first.
  *
- * Failure envelopes are the one place CodeBuddy discloses three wordings: a
- * language pack selects the Traditional Chinese one by region (`zh-TW`, `zh-HK`,
- * `zh-MO`), so those ids have to reach the `zh-hant` key.
+ * Failure envelopes are the one place CodeBuddy discloses three wordings, keyed
+ * `en`, `zh`, and `zh-hant`. A language pack selects one by region (`zh-TW`,
+ * `zh-HK`, `zh-MO` for the traditional one; `zh-CN`, `zh-Hans`, `zh-SG` for the
+ * simplified one), so a regional id has to fall back to the script key the
+ * service actually ships. Without that fallback the lookup misses and the
+ * wording drops to English, which is the one answer a Chinese reader did not
+ * ask for.
  * @param language - the reported tag; `undefined` before the first report.
  */
 export function wordingKeys(language: string | undefined): readonly string[] {
   const key = language?.trim().toLowerCase()
   if (key === undefined || key.length === 0) return []
   if (key === 'zh-tw' || key === 'zh-hk' || key === 'zh-mo') return [key, 'zh-hant']
+  // Any other `zh` tag is simplified: it falls back to the plain `zh` key.
+  if (key === 'zh' || key.startsWith('zh-')) return [key, 'zh']
   return [key]
 }

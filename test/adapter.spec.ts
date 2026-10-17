@@ -369,6 +369,21 @@ describe('stream — HTTP failures', () => {
       .rejects.toMatchObject({ message: 'English wording' })
   })
 
+  it('reports a regional Simplified Chinese client in Chinese, not English', async () => {
+    // The service ships `zh`, never `zh-cn`, so a `zh-CN` client only reaches
+    // the Chinese wording through the script fallback. Without it this reader
+    // would get the English sentence.
+    const body = { code: 1, msg: 'raw', displayMsg: { en: 'English wording', zh: '中文说明', 'zh-hant': '繁體說明' } }
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 400 })))
+    const adapter = new CodeBuddyAdapter({
+      session: sessionOf() as never,
+      options: () => DEFAULT_CONNECTION,
+      language: () => 'zh-CN',
+    })
+    await expect(drain(adapter, { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: '中文说明' })
+  })
+
   it('falls back to the service fields when the reply carries no curated sentence', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
       JSON.stringify({ code: 1, msg: 'raw service wording' }),

@@ -29,9 +29,11 @@ describe('wordingKeys', () => {
   })
 
   it('names the reported tag itself first', () => {
+    // The reported id is always tried first, so a service that later ships a
+    // regional variant gets to use it; any fallback follows.
     expect(wordingKeys('en')).toEqual(['en'])
-    expect(wordingKeys('zh-CN')).toEqual(['zh-cn'])
     expect(wordingKeys('FR')).toEqual(['fr'])
+    expect(wordingKeys('zh-CN')[0]).toBe('zh-cn')
   })
 
   it('adds the traditional-Chinese key for the three traditional regions', () => {
@@ -42,21 +44,42 @@ describe('wordingKeys', () => {
     }
   })
 
-  it('does not route Simplified Chinese to the traditional key', () => {
-    expect(wordingKeys('zh-CN')).toEqual(['zh-cn'])
-    expect(wordingKeys('zh-Hans')).toEqual(['zh-hans'])
+  it('falls back a regional Simplified Chinese id to the plain `zh` key', () => {
+    // The service ships `zh`, not `zh-cn`; without the fallback the lookup
+    // misses and a Chinese reader gets the English wording instead.
+    for (const tag of ['zh-CN', 'zh-Hans', 'zh-SG', 'zh-MY']) {
+      expect(wordingKeys(tag), tag).toEqual([tag.toLowerCase(), 'zh'])
+    }
   })
 
-  it('names a key CodeBuddy does not ship for a regional Simplified tag', () => {
-    // Known gap, pinned deliberately rather than papered over: failure
-    // envelopes ship only `en`, `zh`, and `zh-hant`, so a `zh-CN` client asks
-    // for `zh-cn`, misses, and the English wording wins even though
-    // `prefersChinese` reports Chinese for that same tag. `wordingKeys` is the
-    // only key list a failure read consults, so this assertion documents the
-    // current behaviour; changing it is a product decision, not a test fix.
-    expect(prefersChinese('zh-CN')).toBe(true)
-    expect(wordingKeys('zh-CN')).not.toContain('zh')
-    expect(wordingKeys('zh')).toContain('zh')
+  it('lists the regional id before its fallback, so a shipped variant still wins', () => {
+    // If the service ever adds `zh-cn`, the more specific wording is preferred
+    // over the generic one; the fallback is only a safety net.
+    expect(wordingKeys('zh-CN')).toEqual(['zh-cn', 'zh'])
+    expect(wordingKeys('zh-TW')).toEqual(['zh-tw', 'zh-hant'])
+  })
+
+  it('never sends a Traditional region to the Simplified key', () => {
+    // `zh` carries the simplified wording, so routing a traditional reader
+    // there would answer them in the wrong script.
+    for (const tag of ['zh-TW', 'zh-HK', 'zh-MO']) {
+      expect(wordingKeys(tag), tag).not.toContain('zh')
+    }
+  })
+
+  it('does not invent a Chinese fallback for a non-Chinese tag', () => {
+    for (const tag of ['en', 'ja', 'fr-CA', 'en-US', 'zhx', 'zh_CN']) {
+      expect(wordingKeys(tag), tag).toEqual([tag.toLowerCase()])
+    }
+  })
+
+  it('agrees with prefersChinese about which tags carry Chinese', () => {
+    // Both functions read the same reported tag, so every tag one calls
+    // Chinese must reach a key the service actually ships.
+    for (const tag of ['zh', 'zh-CN', 'zh-Hans', 'zh-TW', 'zh-HK', 'zh-MO']) {
+      expect(prefersChinese(tag), tag).toBe(true)
+      expect(wordingKeys(tag).some(key => key === 'zh' || key === 'zh-hant'), tag).toBe(true)
+    }
   })
 })
 
