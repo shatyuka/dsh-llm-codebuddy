@@ -1,9 +1,9 @@
 /**
- * Durable usage preferences: the view of the Host configuration form the
- * settings rows and the sidebar indicator read — optimistic writes, values
- * adopted from the Host, one shared subscription.
+ * Durable CodeBuddy preferences: the view of the Host configuration form the
+ * settings rows, the sidebar indicator, and the composer model seat read —
+ * optimistic writes, values adopted from the Host, one shared subscription.
  *
- * @module dsh-llm-codebuddy/usage-prefs
+ * @module dsh-llm-codebuddy/prefs
  */
 
 import { useSyncExternalStore } from 'react'
@@ -18,16 +18,40 @@ import {
   DEFAULT_CREDIT_UNIT,
   DEFAULT_DANGER_PCT,
   DEFAULT_SHOW_USAGE,
+  HIDDEN_MODELS_FIELD,
+  MODEL_ORDER_FIELD,
   SHOW_USAGE_FIELD,
   isCreditUnit,
 } from '../settings.js'
 import type { CodeBuddySettings, CreditUnit } from '../settings.js'
 
-/** Shown before the Host answers or with no settings provider; matches the schema defaults. */
-const FALLBACK: CodeBuddySettings = {
-  showUsage: DEFAULT_SHOW_USAGE,
-  customLimitUnit: DEFAULT_CREDIT_UNIT,
-  dangerPct: DEFAULT_DANGER_PCT,
+/**
+ * Shown before the Host answers. A factory, since `getSnapshot()` hands the
+ * object out and a shared instance would be mutable.
+ */
+function fallback(): CodeBuddySettings {
+  return {
+    showUsage: DEFAULT_SHOW_USAGE,
+    customLimitUnit: DEFAULT_CREDIT_UNIT,
+    dangerPct: DEFAULT_DANGER_PCT,
+    modelOrder: [],
+    hiddenModels: [],
+  }
+}
+
+/**
+ * A durable list field read as a fresh copy. Always a new array (snapshots are
+ * handed to consumers); non-string entries are dropped rather than defaulting
+ * the whole list, so one bad id does not lose the arrangement around it.
+ */
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is string => typeof entry === 'string')
+}
+
+/** Whether two id lists hold the same ids in the same order. */
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index])
 }
 
 /**
@@ -35,7 +59,7 @@ const FALLBACK: CodeBuddySettings = {
  * unusable value, which is dropped (optional) or defaulted (required).
  */
 function normalize(section: CodeBuddySettings): CodeBuddySettings {
-  const { showUsage, customLimit, customLimitUnit, dangerPct } = section
+  const { showUsage, customLimit, customLimitUnit, dangerPct, modelOrder, hiddenModels } = section
   const next: CodeBuddySettings = {
     showUsage: typeof showUsage === 'boolean' ? showUsage : DEFAULT_SHOW_USAGE,
     // The unit only ever names a conversion the browser has; an unknown one
@@ -45,6 +69,8 @@ function normalize(section: CodeBuddySettings): CodeBuddySettings {
       && dangerPct >= DANGER_PCT_MIN && dangerPct <= DANGER_PCT_MAX
       ? dangerPct
       : DEFAULT_DANGER_PCT,
+    modelOrder: stringList(modelOrder),
+    hiddenModels: stringList(hiddenModels),
   }
   if (typeof customLimit === 'number' && Number.isFinite(customLimit) && customLimit >= CUSTOM_LIMIT_MIN) {
     next.customLimit = customLimit
@@ -58,13 +84,15 @@ function equal(a: CodeBuddySettings, b: CodeBuddySettings): boolean {
     && a.customLimit === b.customLimit
     && a.customLimitUnit === b.customLimitUnit
     && a.dangerPct === b.dangerPct
+    && sameIds(a.modelOrder, b.modelOrder)
+    && sameIds(a.hiddenModels, b.hiddenModels)
 }
 
 /**
  * The preference surface: writes publish optimistically, then adopt whatever
  * the Host settled on, so a refusal heals into the stored value.
  */
-export interface UsagePrefs {
+export interface CodeBuddyPrefs {
   /** @returns the current preferences (stable reference until they change). */
   getSnapshot(): CodeBuddySettings
   /** @returns the disposer removing this listener. */
@@ -86,6 +114,22 @@ export interface UsagePrefs {
   setCustomLimitUnit(value: CreditUnit): void
   /** Set the danger-color threshold; `undefined` restores the default. */
   setDangerPct(value: number | undefined): void
+  /**
+   * Set the preferred display order of the provider's model ids. An empty
+   * list restores the composition layer's own order by clearing the override,
+   * rather than pinning an explicitly empty one.
+   */
+  setModelOrder(order: readonly string[]): void
+  /**
+   * Set the model ids hidden from the selector's menu. An empty list shows
+   * every model again by clearing the override, as above.
+   */
+  setHiddenModels(ids: readonly string[]): void
+  /**
+   * Restore the model menu to its defaults: catalog order and nothing hidden.
+   * One atomic write, so the two clears cannot settle apart.
+   */
+  resetModelPrefs(): void
   /** Release the form subscription; called on plugin unload. */
   dispose(): void
 }
@@ -94,9 +138,9 @@ export interface UsagePrefs {
  * Build the preference surface over the plugin entry's configuration form.
  * @returns the surface shared by every reader in this tab.
  */
-export function createUsagePrefs(form: ConfigForm<CodeBuddySettings>): UsagePrefs {
+export function createCodeBuddyPrefs(form: ConfigForm<CodeBuddySettings>): CodeBuddyPrefs {
   const initial = form.getSnapshot().value
-  let current: CodeBuddySettings = initial === undefined ? FALLBACK : normalize(initial)
+  let current: CodeBuddySettings = initial === undefined ? fallback() : normalize(initial)
   const listeners = new Set<() => void>()
 
   // `loading` counts as persistent: a notice before the first Host answer
@@ -150,6 +194,8 @@ export function createUsagePrefs(form: ConfigForm<CodeBuddySettings>): UsagePref
         showUsage: current.showUsage,
         customLimitUnit: current.customLimitUnit,
         dangerPct: current.dangerPct,
+        modelOrder: current.modelOrder,
+        hiddenModels: current.hiddenModels,
       }
       if (value !== undefined) next.customLimit = value
       write(
@@ -173,6 +219,39 @@ export function createUsagePrefs(form: ConfigForm<CodeBuddySettings>): UsagePref
           : () => form.set(DANGER_PCT_FIELD, value),
       )
     },
+    setModelOrder: (order) => {
+      // An unchanged list skips the round-trip: `publish` would suppress the
+      // optimistic update anyway, but the Host write is still a request.
+      if (sameIds(order, current.modelOrder)) return
+      const next = [...order]
+      write(
+        { ...current, modelOrder: next },
+        next.length === 0
+          ? () => form.unset(MODEL_ORDER_FIELD)
+          : () => form.set(MODEL_ORDER_FIELD, next),
+      )
+    },
+    setHiddenModels: (ids) => {
+      if (sameIds(ids, current.hiddenModels)) return
+      const next = [...ids]
+      write(
+        { ...current, hiddenModels: next },
+        next.length === 0
+          ? () => form.unset(HIDDEN_MODELS_FIELD)
+          : () => form.set(HIDDEN_MODELS_FIELD, next),
+      )
+    },
+    resetModelPrefs: () => {
+      // Already default: skip cashing a revision fence for a no-op.
+      if (current.modelOrder.length === 0 && current.hiddenModels.length === 0) return
+      write(
+        { ...current, modelOrder: [], hiddenModels: [] },
+        () => form.mutate([
+          { op: 'unset', path: [MODEL_ORDER_FIELD] },
+          { op: 'unset', path: [HIDDEN_MODELS_FIELD] },
+        ]),
+      )
+    },
     dispose: () => {
       unsubscribeForm()
       listeners.clear()
@@ -181,11 +260,11 @@ export function createUsagePrefs(form: ConfigForm<CodeBuddySettings>): UsagePref
 }
 
 /** The current preferences, re-rendering the caller on every change. */
-export function useUsagePrefs(prefs: UsagePrefs): CodeBuddySettings {
+export function useCodeBuddyPrefs(prefs: CodeBuddyPrefs): CodeBuddySettings {
   return useSyncExternalStore(prefs.subscribe, prefs.getSnapshot)
 }
 
 /** Whether edits persist beyond this tab, re-rendering the caller on flip. */
-export function usePersistentPrefs(prefs: UsagePrefs): boolean {
+export function usePersistentPrefs(prefs: CodeBuddyPrefs): boolean {
   return useSyncExternalStore(prefs.subscribe, prefs.isPersistent)
 }

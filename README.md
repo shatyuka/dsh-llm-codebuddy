@@ -15,6 +15,7 @@ Sign in through your browser — **no API key required** — and use CodeBuddy's
 - **Reasoning effort** — pick a thinking level for models that support one.
 - **Image input** — attach images for vision-capable models (models without vision support may be routed to a different model by the server).
 - **Usage indicator** — a quota bar in the Web UI sidebar for both personal and enterprise plans, with an optional custom cap and a configurable danger threshold.
+- **Model arrangement** — reorder the model menu and hide the models you never use.
 
 ## Compatibility
 

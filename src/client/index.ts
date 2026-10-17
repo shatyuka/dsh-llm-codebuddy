@@ -23,18 +23,22 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-api-session-controller/client'
-import { useState, useEffect, useCallback, useRef, createElement as h, Fragment, type ChangeEvent, type HTMLAttributes, type ReactElement } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, createElement as h, Fragment, type ChangeEvent, type HTMLAttributes, type PointerEvent, type ReactElement } from 'react'
 import {
   Button,
   Tooltip,
   Menu,
   Input,
+  Switch,
   IconChevronDownOutlineMedium,
+  IconChevronUpOutlineMedium,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { CodeBuddyModelSelect, MODEL_SELECT_CSS } from './model-select.js'
 import type { ModelSelectT } from './model-select.js'
-import { createUsagePrefs, usePersistentPrefs, useUsagePrefs } from './usage-prefs.js'
-import type { UsagePrefs } from './usage-prefs.js'
+import { badgesOf, creditsOf, rowRate } from './model-badges.js'
+import { moveModelId, orderModelsById, placeModelAt } from './model-order.js'
+import { createCodeBuddyPrefs, useCodeBuddyPrefs, usePersistentPrefs } from './prefs.js'
+import type { CodeBuddyPrefs } from './prefs.js'
 import {
   creditsToUnit,
   formatDraft,
@@ -56,6 +60,7 @@ import { CODEBUDDY_AUTH_CHANNEL as AUTH_CHANNEL } from '../protocol.js'
 import type { CodeBuddySiteId } from '../constants.js'
 import type {
   CodeBuddyAuthStatus as AuthStatus,
+  CodeBuddyModelEntry,
   CodeBuddyRpcEndpoint,
   CodeBuddyRpcRequest,
   CodeBuddyRpcResponse,
@@ -296,11 +301,11 @@ function UsageIndicator({ rpc, t, wide, prefs }: {
   rpc: CodeBuddyRpc
   t: Translate
   wide: boolean
-  prefs: UsagePrefs
+  prefs: CodeBuddyPrefs
 }): ReactElement | null {
   const [usage, setUsage] = useState<UsageResult | undefined>(undefined)
   // Shared preference store: a flip in the settings rows lands here directly.
-  const { showUsage, customLimit, customLimitUnit, dangerPct } = useUsagePrefs(prefs)
+  const { showUsage, customLimit, customLimitUnit, dangerPct } = useCodeBuddyPrefs(prefs)
 
   // Re-read usage immediately when a sign-in or sign-out completes, rather
   // than waiting for the next 60s polling tick.
@@ -419,7 +424,7 @@ const USAGE_REFRESH_MS = 60_000
 function CodeBuddySection({ rpc, t, prefs }: {
   rpc: CodeBuddyRpc
   t: Translate
-  prefs: UsagePrefs
+  prefs: CodeBuddyPrefs
 }): ReactElement {
   const [phase, setPhase] = useState<Phase>('loading')
   const [status, setStatus] = useState<AuthStatus | undefined>(undefined)
@@ -621,6 +626,7 @@ function CodeBuddySection({ rpc, t, prefs }: {
   // The usage preferences live in the Host settings document, so they are
   // configurable whether or not an account is signed in.
   const usagePrefs = h(UsagePrefRows, { t, prefs })
+  const modelPrefs = h(ModelPrefs, { rpc, t, prefs, signedIn })
 
   return h('div', { style: s.section },
     h('h2', { style: s.title }, 'CodeBuddy'),
@@ -642,6 +648,7 @@ function CodeBuddySection({ rpc, t, prefs }: {
             }, t('signOut')),
           ),
           usagePrefs,
+          modelPrefs,
         )
       : h('div', { style: s.status },
           h('p', { style: s.desc }, t('intro')),
@@ -670,6 +677,7 @@ function CodeBuddySection({ rpc, t, prefs }: {
             }, t('cancel')) : null,
           ),
           usagePrefs,
+          modelPrefs,
         ),
   )
 }
@@ -692,9 +700,9 @@ function formatLimit(value: number | undefined, unit: CreditUnit): string {
  */
 function UsagePrefRows({ t, prefs }: {
   t: Translate
-  prefs: UsagePrefs
+  prefs: CodeBuddyPrefs
 }): ReactElement {
-  const { showUsage, customLimit, customLimitUnit, dangerPct } = useUsagePrefs(prefs)
+  const { showUsage, customLimit, customLimitUnit, dangerPct } = useCodeBuddyPrefs(prefs)
   const [menuOpen, setMenuOpen] = useState<boolean>(false)
   const [unitMenuOpen, setUnitMenuOpen] = useState<boolean>(false)
   // The draft is text in the SELECTED unit; the store's `customLimit` is always
@@ -859,6 +867,299 @@ function UsagePrefRows({ t, prefs }: {
   )
 }
 
+/** Grip dots for the drag handle; the primitives ship no drag icon. */
+const GRIP_ART = h('svg', { width: 8, height: 14, viewBox: '0 0 8 14', fill: 'currentColor' },
+  h('circle', { key: '0-0', cx: 2, cy: 2.5, r: 1.5 }),
+  h('circle', { key: '1-0', cx: 6, cy: 2.5, r: 1.5 }),
+  h('circle', { key: '0-1', cx: 2, cy: 7, r: 1.5 }),
+  h('circle', { key: '1-1', cx: 6, cy: 7, r: 1.5 }),
+  h('circle', { key: '0-2', cx: 2, cy: 11.5, r: 1.5 }),
+  h('circle', { key: '1-2', cx: 6, cy: 11.5, r: 1.5 }),
+)
+
+/**
+ * The model-arrangement block: one row per CodeBuddy model with a drag grip, a
+ * visibility switch, and move buttons. The grip is a pointer shortcut; the
+ * buttons are the keyboard path. Hidden rows stay listed, dimmed, keeping their
+ * place in the order.
+ */
+function ModelPrefs({ rpc, t, prefs, signedIn }: {
+  rpc: CodeBuddyRpc
+  t: Translate
+  prefs: CodeBuddyPrefs
+  signedIn: boolean
+}): ReactElement {
+  const { modelOrder, hiddenModels } = useCodeBuddyPrefs(prefs)
+  const [models, setModels] = useState<readonly CodeBuddyModelEntry[] | undefined>(undefined)
+  const [loadError, setLoadError] = useState<string | undefined>(undefined)
+  const [reloadSeq, setReloadSeq] = useState(0)
+  /** In-flight carry: the dragged id and its insertion index among the other rows. */
+  const [drag, setDrag] = useState<{ id: string, toIndex: number } | null>(null)
+  /**
+   * Mounted row elements, keyed by model id. Not index-keyed: the preview
+   * reorders the rows, so a stale ref cleanup would clear a slot another row
+   * now owns.
+   */
+  const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  /**
+   * The other rows' midpoints, snapshotted at the grab: live rects would
+   * oscillate as the preview moves a just-passed row up by its own height.
+   */
+  const dragMidsRef = useRef<number[]>([])
+  /** Pointer position minus the dragged row's center, so the grab offset cancels. */
+  const dragOffsetRef = useRef(0)
+  /** The pointer id being carried, so the window listeners ignore every other. */
+  const dragPointerRef = useRef<number | null>(null)
+
+  // `reloadSeq` is the manual retry. Clearing the rows first keeps a failed
+  // retry on the loading branch instead of flickering a stale list.
+  useEffect(() => {
+    if (!signedIn) {
+      setModels(undefined)
+      setLoadError(undefined)
+      return
+    }
+    let stopped = false
+    setLoadError(undefined)
+    setModels(undefined)
+    void rpc.call('models', {}).then((result) => {
+      if (stopped) return
+      if (result.ok) {
+        setModels(result.value.loggedIn ? result.value.models : [])
+      } else {
+        setLoadError(describeError(result))
+      }
+    }, (reason: unknown) => {
+      if (!stopped) setLoadError(reason instanceof Error ? reason.message : String(reason))
+    })
+    return () => { stopped = true }
+  }, [rpc, signedIn, reloadSeq])
+
+  // Catalog order overridden by the stored one; a carry previews and the drop commits.
+  const arranged = useMemo(() => {
+    const base = models === undefined ? [] : orderModelsById(models, modelOrder)
+    return drag === null ? base : placeModelAt(base, drag.id, drag.toIndex)
+  }, [models, modelOrder, drag])
+  const hiddenIds = useMemo(() => new Set<string>(hiddenModels), [hiddenModels])
+
+  const move = (id: string, delta: number): void => {
+    // Snapshot the full displayed arrangement, so a server-side addition keeps
+    // its place instead of reverting to catalog order.
+    prefs.setModelOrder(moveModelId(arranged.map((model) => model.id), id, delta))
+  }
+  const setHidden = (id: string, hidden: boolean): void => {
+    prefs.setHiddenModels(hidden
+      ? [...hiddenModels, id]
+      : hiddenModels.filter((entry) => entry !== id))
+  }
+
+  /** Begin carrying a row from its grip: primary pointer only. */
+  const grabRow = (event: PointerEvent<HTMLSpanElement>, id: string): void => {
+    if (drag !== null || event.button !== 0 || !event.isPrimary) return
+    // Suppress focus change, text selection, and the compatibility mouse events.
+    event.preventDefault()
+    // Midpoints of the other rows, in `arranged` order rather than DOM order,
+    // so the snapshot stays visual whatever React re-inserted.
+    const mids: number[] = []
+    for (const model of arranged) {
+      if (model.id === id) continue
+      const row = rowRefs.current.get(model.id)
+      if (row === undefined) continue
+      const rect = row.getBoundingClientRect()
+      mids.push(rect.top + rect.height / 2)
+    }
+    // The initial slot is the row's own position in that same order.
+    const initial = arranged.findIndex((model) => model.id === id)
+    dragMidsRef.current = mids
+    // A grab near the top edge would otherwise read as an immediate move up.
+    const own = rowRefs.current.get(id)?.getBoundingClientRect()
+    dragOffsetRef.current = own === undefined
+      ? 0
+      : event.clientY - (own.top + own.height / 2)
+    dragPointerRef.current = event.pointerId
+    setDrag({ id, toIndex: Math.max(initial, 0) })
+  }
+  /** Carry the grabbed row to the slot under the pointer. */
+  const carryRow = (clientY: number, id: string): void => {
+    if (drag === null || drag.id !== id) return
+    const center = clientY - dragOffsetRef.current
+    // Top-to-bottom, so the insertion index counts the midpoints passed.
+    let to = 0
+    for (const mid of dragMidsRef.current) {
+      if (center > mid) to++
+    }
+    if (to !== drag.toIndex) setDrag({ id, toIndex: to })
+  }
+  /** Clear the carry bookkeeping shared by drop and cancel. */
+  const endCarry = (): void => {
+    setDrag(null)
+    dragMidsRef.current = []
+    dragOffsetRef.current = 0
+    dragPointerRef.current = null
+  }
+  /** Drop: commit the preview as the next stored order. */
+  const dropRow = (id: string): void => {
+    if (drag === null || drag.id !== id) return
+    const next = arranged.map((model) => model.id)
+    endCarry()
+    // A drop back onto the stored arrangement is skipped inside the store.
+    prefs.setModelOrder(next)
+  }
+  /** Abandon a carry (Escape, cancelled pointer, lost capture): keep stored order. */
+  const releaseRow = (id: string): void => {
+    if (drag === null || drag.id !== id) return
+    endCarry()
+  }
+
+  // The gesture lives on `window`: the preview may re-insert the gripped node,
+  // dropping its capture. Handlers read callbacks through a ref, so the effect
+  // depends only on the carried id.
+  const dragApiRef = useRef({ carryRow, dropRow, releaseRow })
+  dragApiRef.current = { carryRow, dropRow, releaseRow }
+  const dragId = drag?.id ?? null
+  useEffect(() => {
+    if (dragId === null) return
+    const api = (): typeof dragApiRef.current => dragApiRef.current
+    const mine = (event: globalThis.PointerEvent): boolean =>
+      event.pointerId === dragPointerRef.current
+    const move = (event: globalThis.PointerEvent): void => {
+      if (mine(event)) api().carryRow(event.clientY, dragId)
+    }
+    const up = (event: globalThis.PointerEvent): void => {
+      if (mine(event)) api().dropRow(dragId)
+    }
+    const cancel = (event: globalThis.PointerEvent): void => {
+      if (mine(event)) api().releaseRow(dragId)
+    }
+    const key = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      api().releaseRow(dragId)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+    window.addEventListener('keydown', key)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', cancel)
+      window.removeEventListener('keydown', key)
+    }
+  }, [dragId])
+
+  const body: ReactElement[] = []
+  if (loadError !== undefined) {
+    body.push(h('div', { key: 'error', className: 'cb-modelNotice cb-modelError' },
+      h('span', null, t('modelLoadError')),
+      h('button', {
+        type: 'button',
+        className: 'cb-modelTextButton',
+        onClick: () => { setReloadSeq((v) => v + 1) },
+      }, t('retry')),
+    ))
+  } else if (!signedIn) {
+    body.push(h('div', { key: 'signedOut', className: 'cb-modelNotice' }, t('modelSignInHint')))
+  } else if (models === undefined) {
+    body.push(h('div', { key: 'loading', className: 'cb-modelNotice' }, t('loading')))
+  } else if (models.length === 0) {
+    body.push(h('div', { key: 'empty', className: 'cb-modelNotice' }, t('modelEmpty')))
+  } else {
+    body.push(h('div', { key: 'list', className: 'cb-modelList', role: 'list' },
+      arranged.map((model, index) => {
+        const hidden = hiddenIds.has(model.id)
+        const dragging = drag !== null && drag.id === model.id
+        const rate = rowRate(creditsOf(model), model.promotion)
+        return h('div', {
+          key: model.id,
+          ref: (el: HTMLDivElement | null): void => {
+            if (el === null) rowRefs.current.delete(model.id)
+            else rowRefs.current.set(model.id, el)
+          },
+          className: `cb-modelRow${hidden ? ' cb-modelRowHidden' : ''}${dragging ? ' cb-modelRowDragging' : ''}`,
+          role: 'listitem',
+          // No aria-label: on a list item it replaces the content as the
+          // accessible name, hiding the tags, multiplier, and switch state.
+        },
+          // Only the grab lands here; the rest is window-driven.
+          h('span', {
+            className: 'cb-modelGrip',
+            title: t('dragModel'),
+            'aria-hidden': true,
+            onPointerDown: (event: PointerEvent<HTMLSpanElement>) => { grabRow(event, model.id) },
+          }, GRIP_ART),
+          h('div', { className: 'cb-modelMoves' },
+            h('button', {
+              type: 'button',
+              className: 'cb-modelMove',
+              'aria-label': t('moveUpModel', { name: model.name }),
+              title: t('moveUp'),
+              disabled: index === 0,
+              onClick: () => { move(model.id, -1) },
+            }, h(IconChevronUpOutlineMedium)),
+            h('button', {
+              type: 'button',
+              className: 'cb-modelMove',
+              'aria-label': t('moveDownModel', { name: model.name }),
+              title: t('moveDown'),
+              disabled: index === arranged.length - 1,
+              onClick: () => { move(model.id, 1) },
+            }, h(IconChevronDownOutlineMedium)),
+          ),
+          h('span', { className: 'cb-modelName' }, model.name),
+          // Same pills and rate as the model menu; "hidden" is left to the dimming.
+          badgesOf(model.tags).map((badge) => h('span', {
+            key: badge.key,
+            className: 'cb-modelTag',
+            style: { color: badge.color, borderColor: badge.color },
+          }, badge.label)),
+          // The promotion badge rides after the catalog badges, as in the menu.
+          model.promotion !== undefined ? h('span', {
+            key: 'promotion',
+            className: 'cb-modelTag',
+            style: { color: model.promotion.color, borderColor: model.promotion.color },
+          }, model.promotion.label) : null,
+          rate !== undefined ? h('span', {
+            className: `cb-modelCredits${rate.promo ? ' cb-modelCreditsPromo' : rate.free ? ' cb-modelCreditsFree' : ''}`,
+            ...rate.tint === undefined ? {} : { style: { color: rate.tint } },
+          }, rate.label) : null,
+          h(Switch, {
+            checked: !hidden,
+            onChange: (next) => { setHidden(model.id, !next) },
+            label: t('modelShowSwitch', { name: model.name }),
+            className: 'cb-modelSwitch',
+          }),
+        )
+      }),
+    ))
+  }
+
+  // Gated like the rows it acts on.
+  const showReset = loadError === undefined && signedIn
+    && models !== undefined && models.length > 0
+  // Default is both an unarranged order AND nothing hidden.
+  const isDefault = modelOrder.length === 0 && hiddenModels.length === 0
+
+  return h('div', { className: 'cb-modelPrefs' },
+    h('div', { className: 'cb-modelHeader' },
+      h('div', { className: 'cb-modelHeaderText' },
+        h('div', { className: 'cb-prefTitle' }, t('modelPrefs')),
+        h('div', { className: 'cb-prefDesc' }, t('modelPrefsDesc')),
+      ),
+      // One write restores both halves: catalog order and full visibility.
+      showReset ? h(Button, {
+        variant: 'ghost',
+        size: 'sm',
+        className: 'cb-modelReset',
+        title: t('modelResetHint'),
+        disabled: isDefault,
+        onClick: () => { prefs.resetModelPrefs() },
+      }, t('modelReset')) : null,
+    ),
+    ...body,
+  )
+}
+
 /** This plugin's settings namespace for copy. */
 const NS = 'settings.codebuddy'
 
@@ -901,6 +1202,20 @@ const DICTS = {
     'dangerPctDesc': '已用百分比达到此值时，进度条变为红色提醒。默认 90%。',
     'usageUsed': '已用额度',
     'usageResets': '重置时间',
+    'modelPrefs': '模型选择',
+    'modelPrefsDesc': '调整模型菜单中 CodeBuddy 模型的显示顺序与可见性。',
+    'modelSignInHint': '登录 CodeBuddy 后即可在此调整模型。',
+    'modelLoadError': '模型列表加载失败。',
+    'retry': '重试',
+    'modelEmpty': '暂无可用模型。',
+    'moveUp': '上移',
+    'moveDown': '下移',
+    'moveUpModel': '上移 {name}',
+    'moveDownModel': '下移 {name}',
+    'modelShowSwitch': '在菜单中显示 {name}',
+    'modelReset': '恢复默认',
+    'modelResetHint': '恢复默认顺序，并重新显示全部模型',
+    'dragModel': '拖动调整顺序',
   },
   en: {
     'nav': 'CodeBuddy',
@@ -939,6 +1254,20 @@ const DICTS = {
     'dangerPctDesc': 'The fill turns red once used usage reaches this percentage. Defaults to 90%.',
     'usageUsed': 'Usage',
     'usageResets': 'Resets at',
+    'modelPrefs': 'Model selection',
+    'modelPrefsDesc': 'Arrange the order and visibility of CodeBuddy models in the model menu.',
+    'modelSignInHint': 'Sign in to CodeBuddy to arrange models here.',
+    'modelLoadError': 'Failed to load the model list.',
+    'retry': 'Retry',
+    'modelEmpty': 'No models available.',
+    'moveUp': 'Move up',
+    'moveDown': 'Move down',
+    'moveUpModel': 'Move {name} up',
+    'moveDownModel': 'Move {name} down',
+    'modelShowSwitch': 'Show {name} in the menu',
+    'modelReset': 'Reset',
+    'modelResetHint': 'Restore the default order and show every model again',
+    'dragModel': 'Drag to reorder',
   },
 } as const
 
@@ -975,7 +1304,7 @@ export const inject = [
 /**
  * Scoped CSS for the settings rows: inline styles cannot express the `:hover`
  * and focus pseudo-states the shipped rows use, so one `<style>` tag carries
- * them under plugin-scoped classes.
+ * them under plugin-scoped classes, model rows included.
  */
 const PREF_CSS = `
 .cb-prefRow{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
@@ -993,6 +1322,34 @@ const PREF_CSS = `
 .cb-accountHeader:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:6px}
 .cb-accountChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-tertiary);transition:transform 160ms ease,color 160ms ease}
 .cb-accountChevron[data-open="true"]{transform:rotate(180deg)}
+.cb-modelPrefs{display:flex;flex-direction:column}
+.cb-modelHeader{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px 0 8px;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.cb-modelHeaderText{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
+.cb-modelNotice{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px;padding:8px 0}
+.cb-modelError{display:flex;align-items:center;justify-content:space-between;gap:6px;color:var(--dsw-alias-state-error-primary,#e5484d)}
+.cb-modelTextButton{color:inherit;font:inherit;font-size:12px;font-weight:600;line-height:18px;cursor:pointer;background:none;border:none;border-radius:4px;padding:0}
+.cb-modelTextButton:hover:not(:disabled){opacity:.85}
+.cb-modelTextButton:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
+.cb-modelTextButton:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.cb-modelList{display:flex;flex-direction:column}
+.cb-modelRow{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--dsw-alias-border-l2);min-width:0}
+.cb-modelSwitch{flex:none}
+.cb-modelMoves{display:flex;flex-direction:column;flex:none}
+.cb-modelGrip{align-self:stretch;flex:none;color:var(--dsw-alias-label-dimmed);cursor:grab;display:inline-flex;align-items:center;justify-content:center;touch-action:none}
+.cb-modelGrip:hover{color:var(--dsw-alias-label-secondary)}
+.cb-modelRowDragging{background:var(--dsw-alias-interactive-bg-hover);border-radius:8px;user-select:none}
+.cb-modelRowDragging .cb-modelGrip{cursor:grabbing;color:var(--dsw-alias-label-secondary)}
+.cb-modelMove{width:20px;height:16px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:none;border:none;border-radius:4px;padding:0;display:inline-flex;align-items:center;justify-content:center}
+.cb-modelMove:hover:not(:disabled){color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.cb-modelMove:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
+.cb-modelMove:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.cb-modelName{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:400;line-height:22px;flex:1 1 auto;min-width:0;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
+.cb-modelRowHidden .cb-modelName{color:var(--dsw-alias-label-tertiary)}
+.cb-modelTag{flex:0 1 auto;min-width:0;border:0.5px solid;border-radius:4px;padding:0 5px;font-size:11px;line-height:16px;font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cb-modelCredits{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;white-space:nowrap;flex:none;font-size:12px;line-height:18px;font-weight:400}
+.cb-modelCreditsFree{color:var(--dsw-alias-state-success-primary)}
+.cb-modelCreditsPromo{color:var(--dsw-alias-state-business-primary)}
+.cb-modelReset{flex:none;margin-top:2px;color:var(--dsw-alias-label-secondary);font-weight:400}
 `
 const PREF_CSS_TAG = '@shatyuka/dsh-llm-codebuddy/pref.module.css'
 
@@ -1018,7 +1375,7 @@ export function apply(ctx: Context): void {
   // Durable preferences: this plugin's own configuration form. When the
   // settings transport reports the entry `unavailable` the surface keeps the
   // schema defaults, so the controls stay usable.
-  const prefs = createUsagePrefs(ctx.configForms.get(CODEBUDDY_SETTINGS_NAMESPACE))
+  const prefs = createCodeBuddyPrefs(ctx.configForms.get(CODEBUDDY_SETTINGS_NAMESPACE))
   ctx.effect(() => () => { prefs.dispose() }, 'dsh-llm-codebuddy: settings form subscription')
 
   const injected = () => ({ rpc, prefs })
@@ -1087,11 +1444,14 @@ export function apply(ctx: Context): void {
             directory.select(selection),
         }
       },
-    }, (props: Omit<Parameters<typeof CodeBuddyModelSelect>[0], 'rpc' | 't'>) => CodeBuddyModelSelect({
-      ...props,
-      rpc: enrichedRpc,
-      t: modelT,
-    })))
+    }, (props: Omit<Parameters<typeof CodeBuddyModelSelect>[0], 'rpc' | 't' | 'prefs'>) =>
+      CodeBuddyModelSelect({
+        ...props,
+        rpc: enrichedRpc,
+        t: modelT,
+        // Same store as the settings page, so edits land live.
+        prefs,
+      })))
   })
 }
 

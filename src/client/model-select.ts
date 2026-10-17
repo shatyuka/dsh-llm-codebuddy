@@ -32,6 +32,10 @@ import {
 import type { ModelSelectInjected } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { Translate, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { CODEBUDDY_PROVIDER } from '../constants.js'
+import { badgesOf, creditsOf, rowRate } from './model-badges.js'
+import { orderModelsById } from './model-order.js'
+import { useCodeBuddyPrefs } from './prefs.js'
+import type { CodeBuddyPrefs } from './prefs.js'
 import type { CodeBuddyModelEntry } from '../protocol.js'
 
 /**
@@ -49,12 +53,6 @@ export type EnrichedModel = CodeBuddyModelEntry
 /** Official shared model-directory face injected into the composer seat. */
 export type ModelDirectoryFace = ModelSelectInjected
 
-/** One parsed display tag: label plus its color. */
-export interface DisplayTag {
-  label: string
-  color: string
-}
-
 const ACCOUNT_PROVIDER = 'deepseek-account'
 
 const OFFICIAL_PROVIDER = 'deepseek-official'
@@ -66,30 +64,6 @@ function providerRank(id: string): number {
 /** Account and official providers first (`toSorted` needs ES2023). */
 function orderModelProviders<T extends { readonly id: string }>(groups: readonly T[]): T[] {
   return [...groups].sort((left, right) => providerRank(left.id) - providerRank(right.id))
-}
-
-/**
- * Parse one raw catalog tag into a display pill, or drop it.
- *
- * Enterprise accounts receive pre-styled badges as `badge:<label>:#RRGGBB`
- * (e.g. `badge:new:#FF8C00`), whose color is rendered as given; badge-form tags
- * render as pills and every other tag is dropped.
- */
-function parseTag(tag: string): DisplayTag | undefined {
-  const badge = /^badge:(.+):#([0-9a-f]{6})$/iu.exec(tag)
-  const label = badge?.[1]
-  const color = badge?.[2]
-  if (label === undefined || color === undefined) return undefined
-  return { label, color: `#${color}` }
-}
-
-/**
- * The credits label a row shows, or undefined.
- *
- * The enriched catalog's `credits` is the authoritative source.
- */
-function creditsOf(enriched: EnrichedModel | undefined): string | undefined {
-  return enriched?.credits
 }
 
 /**
@@ -117,29 +91,6 @@ function builtinDescriptionOf(
   const key = `option.${camelCase(model.id)}.description`
   const localized = wide(key)
   return localized !== key ? localized : model.description
-}
-
-/**
- * The rate label a row shows at its trailing edge. An active promotion's
- * override replaces the catalog rate and always uses the promotion badge color.
- */
-function rowRate(credits: string | undefined, promotion: EnrichedModel['promotion']): { label: string, promo: boolean, free: boolean, tint?: string } | undefined {
-  const promoLabel = promotion?.discountedRate
-  const label = promoLabel ?? credits
-  if (label === undefined) return undefined
-  return {
-    label,
-    promo: promoLabel !== undefined,
-    free: isFreeCredits(label),
-    ...promoLabel !== undefined && promotion?.color !== undefined ? { tint: promotion.color } : {},
-  }
-}
-
-/**
- * Whether a credit label reads as a zero rate ("x0.00").
- */
-function isFreeCredits(credits: string | undefined): boolean {
-  return credits !== undefined && /^x0(?:\.0+)?$/iu.test(credits.trim())
 }
 
 /**
@@ -196,7 +147,7 @@ function modelTooltipContent(
   enriched: EnrichedModel | undefined,
   t: ModelSelectT,
 ): ReactElement {
-  const badges = (enriched?.tags ?? []).map(parseTag).filter((tag): tag is DisplayTag => tag !== undefined)
+  const badges = badgesOf(enriched?.tags)
   const promotion = enriched?.promotion
   // CodeBuddy's description arrives pre-localized; other providers fall back
   // to the catalog text, with DeepSeek's built-in wording localized.
@@ -209,7 +160,7 @@ function modelTooltipContent(
     ),
     badges.length > 0 || promotion !== undefined ? h('div', { className: 'cbms-tipTags' },
       badges.map((badge) => h('span', {
-        key: badge.label,
+        key: badge.key,
         className: 'cbms-tag',
         style: { color: badge.color, borderColor: badge.color },
       }, badge.label)),
@@ -233,6 +184,8 @@ function modelTooltipContent(
  *
  * Props mirror the official seat's contract (`conversation.input.model`):
  * owner share `locked` plus the injected face over the shared directory.
+ * Beyond the contract, this plugin passes its preference store (`prefs`) so
+ * the CodeBuddy group's rows follow the arrangement made on the settings page.
  */
 export function CodeBuddyModelSelect({
   locked,
@@ -242,10 +195,12 @@ export function CodeBuddyModelSelect({
   select,
   rpc,
   t,
+  prefs,
 }: {
   locked: boolean
   rpc: EnrichedCatalogRpc
   t: ModelSelectT
+  prefs: CodeBuddyPrefs
 } & ModelDirectoryFace): ReactElement | null {
   const state = useSyncExternalStore(
     (fn) => directory.subscribe(fn),
@@ -284,6 +239,24 @@ export function CodeBuddyModelSelect({
     [state.groups, accountProviderName],
   )
 
+  // Durable arrangement of this provider's rows, owned by the settings page.
+  // The seat re-renders as the arrangement changes, so an edit while the menu
+  // is open lands immediately.
+  const { modelOrder, hiddenModels } = useCodeBuddyPrefs(prefs)
+  const hiddenIds = useMemo(() => new Set<string>(hiddenModels), [hiddenModels])
+
+  // The menu's view of each group: the CodeBuddy group follows the persisted
+  // order and drops hidden ids, so they disappear from search as well; other
+  // providers render exactly as the catalog holds them. `choices` below stays
+  // unfiltered, so a hidden current selection keeps its trigger caption and
+  // its effort pane — hiding only removes the row from the menu.
+  const displayGroups = useMemo(() => groups.map((group) => group.id === CODEBUDDY_PROVIDER
+    ? {
+      ...group,
+      models: orderModelsById(group.models, modelOrder).filter((model) => !hiddenIds.has(model.id)),
+    }
+    : group), [groups, modelOrder, hiddenIds])
+
   // Identity of the rows the shared directory currently advertises, including
   // the name and harness description (the credit multiplier) so a display-fact
   // change is part of the key too. Fed to the enrichment fetch so a catalog
@@ -304,10 +277,16 @@ export function CodeBuddyModelSelect({
       ...model.reasoning?.defaultEffort === undefined ? {} : { reasoningEffort: model.reasoning.defaultEffort },
     },
   }))), [groups])
-  const showSearch = choices.length > 4
-  const filteredGroups = useMemo(() => groups
+  // Hidden models never render, so the search affordance counts the visible
+  // rows alone — hiding down to a handful removes the search box with them.
+  const visibleCount = useMemo(
+    () => displayGroups.reduce((count, group) => count + group.models.length, 0),
+    [displayGroups],
+  )
+  const showSearch = visibleCount > 4
+  const filteredGroups = useMemo(() => displayGroups
     .map((group) => ({ ...group, models: rankByName(group.models, showSearch ? query.trim() : '') }))
-    .filter((group) => group.models.length > 0), [groups, query, showSearch])
+    .filter((group) => group.models.length > 0), [displayGroups, query, showSearch])
   const visibleModels = useMemo(
     () => filteredGroups.flatMap((group) => group.models.map((model) => ({ provider: group.id, model: model.id }))),
     [filteredGroups],
@@ -709,7 +688,7 @@ export function CodeBuddyModelSelect({
               // Keyed `provider/model`, so other providers' rows never match.
               const extra = enriched.get(`${group.id}/${model.id}`)
               const rate = rowRate(creditsOf(extra), extra?.promotion)
-              const badges = (extra?.tags ?? []).map(parseTag).filter((tag): tag is DisplayTag => tag !== undefined)
+              const badges = badgesOf(extra?.tags)
               const promotion = extra?.promotion
               return richTooltip({
                 key: model.id,
@@ -737,7 +716,7 @@ export function CodeBuddyModelSelect({
                 h('span', { className: 'cbms-optionCopy' },
                   h('span', { className: 'cbms-modelName' }, model.name),
                   badges.map((badge) => h('span', {
-                    key: badge.label, className: 'cbms-tag',
+                    key: badge.key, className: 'cbms-tag',
                     style: { color: badge.color, borderColor: badge.color },
                   }, badge.label)),
                   // The promotion badge rides after the catalog badges.

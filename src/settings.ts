@@ -21,11 +21,30 @@ export const CUSTOM_LIMIT_UNIT_FIELD = 'customLimitUnit'
 /** Field: used-percentage at which the indicator fill turns the danger color. */
 export const DANGER_PCT_FIELD = 'dangerPct'
 
+/** Field: preferred display order of the provider's model ids in the selector. */
+export const MODEL_ORDER_FIELD = 'modelOrder'
+
+/** Field: provider model ids hidden from the selector menu. */
+export const HIDDEN_MODELS_FIELD = 'hiddenModels'
+
 /** Default for {@link SHOW_USAGE_FIELD}: the indicator shows unless hidden. */
 export const DEFAULT_SHOW_USAGE = true
 
 /** Default for {@link DANGER_PCT_FIELD}. */
 export const DEFAULT_DANGER_PCT = 90
+
+/**
+ * Default for {@link MODEL_ORDER_FIELD}: the catalog's own order. A factory,
+ * since the value reaches snapshots callers may mutate.
+ */
+export function defaultModelOrder(): string[] {
+  return []
+}
+
+/** Default for {@link HIDDEN_MODELS_FIELD}: nothing is hidden. */
+export function defaultHiddenModels(): string[] {
+  return []
+}
 
 /**
  * Smallest accepted {@link CUSTOM_LIMIT_FIELD}.
@@ -78,6 +97,13 @@ export interface CodeBuddySettings {
   customLimitUnit: CreditUnit
   /** Used-percentage at which the indicator fill turns the danger color. */
   dangerPct: number
+  /**
+   * Preferred display order of the provider's model ids. Unlisted ids keep the
+   * catalog's order after the listed ones, so a new model appears at the foot.
+   */
+  modelOrder: string[]
+  /** CodeBuddy provider model ids hidden from the selector's menu rows. */
+  hiddenModels: string[]
 }
 
 /** One top-level field of the durable section; the unit of a scope write. */

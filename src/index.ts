@@ -24,7 +24,14 @@ import {
 import { CodeBuddySession } from './session.js'
 import { MessageLocale } from './locale.js'
 import { SettingsFields } from './settings-schema.js'
-import { SHOW_USAGE_FIELD, CUSTOM_LIMIT_FIELD, CUSTOM_LIMIT_UNIT_FIELD, DANGER_PCT_FIELD } from './settings.js'
+import {
+  DANGER_PCT_FIELD,
+  HIDDEN_MODELS_FIELD,
+  CUSTOM_LIMIT_FIELD,
+  CUSTOM_LIMIT_UNIT_FIELD,
+  MODEL_ORDER_FIELD,
+  SHOW_USAGE_FIELD,
+} from './settings.js'
 import type { CreditUnit } from './settings.js'
 
 export { CodeBuddyAdapter, httpErrorCode } from './adapter.js'
@@ -65,7 +72,11 @@ export {
   DEFAULT_CREDIT_UNIT,
   DEFAULT_DANGER_PCT,
   DEFAULT_SHOW_USAGE,
+  HIDDEN_MODELS_FIELD,
+  MODEL_ORDER_FIELD,
   SHOW_USAGE_FIELD,
+  defaultHiddenModels,
+  defaultModelOrder,
   isCreditUnit,
 } from './settings.js'
 export type { CodeBuddySettings, CodeBuddySettingsField, CreditUnit } from './settings.js'
@@ -82,7 +93,7 @@ export const inject = ['llm']
 // `exports.default ?? exports`, which would discard `inject` and `name`.
 
 /**
- * Plugin config. Route facts are ordinary entry config; the three usage
+ * Plugin config. Route facts are ordinary entry config; the usage and model
  * preference fields are `volatile`, so the Web settings forms own their
  * durable storage and edits apply without a reload.
  */
@@ -101,6 +112,8 @@ export const Config = z.object({
   [CUSTOM_LIMIT_FIELD]: SettingsFields[CUSTOM_LIMIT_FIELD].volatile(),
   [CUSTOM_LIMIT_UNIT_FIELD]: SettingsFields[CUSTOM_LIMIT_UNIT_FIELD].volatile(),
   [DANGER_PCT_FIELD]: SettingsFields[DANGER_PCT_FIELD].volatile(),
+  [MODEL_ORDER_FIELD]: SettingsFields[MODEL_ORDER_FIELD].volatile(),
+  [HIDDEN_MODELS_FIELD]: SettingsFields[HIDDEN_MODELS_FIELD].volatile(),
 })
 
 /** Untyped mirror of {@link Config}'s fields; see the field docs there. */
@@ -114,6 +127,8 @@ export interface Config {
   customLimit?: number
   customLimitUnit?: CreditUnit
   dangerPct?: number
+  modelOrder?: string[]
+  hiddenModels?: string[]
 }
 
 /**
