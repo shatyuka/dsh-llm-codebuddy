@@ -20,7 +20,7 @@ Sign in through your browser — **no API key required** — and use CodeBuddy's
 
 | Requirement | Version |
 | --- | --- |
-| DeepSeek Harness (`dsh`) | `>= 0.1.7-rc.1` |
+| DeepSeek Harness (`dsh`) | `>= 0.2.1-rc.1` |
 
 Web UI features such as the settings page, model picker, and usage indicator require the `web` profile.
 

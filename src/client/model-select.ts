@@ -11,14 +11,21 @@
  */
 
 import type { Key, ReactElement } from 'react'
-import { createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import {
   IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
   IconChevronRightOutlineRegular,
+  IconCloseFillRegular,
   IconDataOutlineRegular,
   IconWarningOutlineRegular,
+  Input,
+  MenuGroup,
+  MenuSurface,
+  observeStickyMenuGroups,
+  rankByName,
+  StateDot,
   Toast,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -46,6 +53,19 @@ export type ModelDirectoryFace = ModelSelectInjected
 export interface DisplayTag {
   label: string
   color: string
+}
+
+const ACCOUNT_PROVIDER = 'deepseek-account'
+
+const OFFICIAL_PROVIDER = 'deepseek-official'
+
+function providerRank(id: string): number {
+  return id === ACCOUNT_PROVIDER ? 0 : id === OFFICIAL_PROVIDER ? 1 : 2
+}
+
+/** Account and official providers first (`toSorted` needs ES2023). */
+function orderModelProviders<T extends { readonly id: string }>(groups: readonly T[]): T[] {
+  return [...groups].sort((left, right) => providerRank(left.id) - providerRank(right.id))
 }
 
 /**
@@ -214,7 +234,15 @@ function modelTooltipContent(
  * Props mirror the official seat's contract (`conversation.input.model`):
  * owner share `locked` plus the injected face over the shared directory.
  */
-export function CodeBuddyModelSelect({ locked, available, directory, load, select, rpc, t }: {
+export function CodeBuddyModelSelect({
+  locked,
+  available,
+  directory,
+  load,
+  select,
+  rpc,
+  t,
+}: {
   locked: boolean
   rpc: EnrichedCatalogRpc
   t: ModelSelectT
@@ -228,15 +256,34 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
   )
   const [open, setOpen] = useState(false)
   const [pane, setPane] = useState<'root' | 'model' | 'effort'>('root')
+  const [query, setQuery] = useState('')
+  const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null)
+  const [selectionFocus, setSelectionFocus] = useState(false)
   const lastActionRef = useRef<'load' | 'select'>('load')
   const [toast, setToast] = useState<{ text: string } | null>(null)
   const toastSeq = useRef(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const groupsRef = useRef<HTMLDivElement>(null)
   const [menuPos, setMenuPos] = useState<{ left: number, top: number } | null>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const id = useMemo(() => `cb-model-${Math.random().toString(36).slice(2, 8)}`, [])
+  const id = useId()
+
+  // The account route shows its localized name, not the catalog's.
+  const accountProviderName = t('provider.account')
+  const groups = useMemo(
+    () => orderModelProviders(state.groups).map((group) => ({
+      ...group,
+      provider: {
+        id: group.id,
+        name: group.id === ACCOUNT_PROVIDER ? accountProviderName : group.name,
+      },
+    })),
+    [state.groups, accountProviderName],
+  )
+
   // Identity of the rows the shared directory currently advertises, including
   // the name and harness description (the credit multiplier) so a display-fact
   // change is part of the key too. Fed to the enrichment fetch so a catalog
@@ -248,7 +295,7 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
   )
   const enriched = useEnrichedCatalog(rpc, open, catalogKey)
 
-  const choices = useMemo(() => state.groups.flatMap((group) => group.models.map((model) => ({
+  const choices = useMemo(() => groups.flatMap((group) => group.models.map((model) => ({
     group,
     model,
     selection: {
@@ -256,20 +303,36 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
       model: model.id,
       ...model.reasoning?.defaultEffort === undefined ? {} : { reasoningEffort: model.reasoning.defaultEffort },
     },
-  }))), [state.groups])
+  }))), [groups])
+  const showSearch = choices.length > 4
+  const filteredGroups = useMemo(() => groups
+    .map((group) => ({ ...group, models: rankByName(group.models, showSearch ? query.trim() : '') }))
+    .filter((group) => group.models.length > 0), [groups, query, showSearch])
+  const visibleModels = useMemo(
+    () => filteredGroups.flatMap((group) => group.models.map((model) => ({ provider: group.id, model: model.id }))),
+    [filteredGroups],
+  )
+  const currentVisibleIndex = visibleModels.findIndex(
+    (model) => model.provider === state.current?.provider && model.model === state.current.model,
+  )
+  const activeModelIndex = Math.min(highlightedIndex ?? Math.max(0, currentVisibleIndex), visibleModels.length - 1)
   const currentChoice = choices[state.current === null ? -1 : choices.findIndex((c) =>
     c.selection.provider === state.current?.provider && c.selection.model === state.current.model)]
   const reasoning = currentChoice?.model.reasoning
   const effectiveEffort = state.current?.reasoningEffort ?? reasoning?.defaultEffort
-  const effortLabel = reasoning === undefined ? undefined
-    : effectiveEffort === undefined ? t('effort.providerDefault')
-      : reasoning.efforts.find((level) => level.id === effectiveEffort)?.name ?? effectiveEffort
+  // Keeps the caption when the selection left the catalog.
+  const effortLabel = currentChoice === undefined ? undefined
+    : reasoning === undefined ? state.retainedEffort
+      : effectiveEffort === undefined ? t('effort.providerDefault')
+        : reasoning.efforts.find((level) => level.id === effectiveEffort)?.name ?? effectiveEffort
   const effortChoices = useMemo(() => reasoning === undefined ? [] : [
     ...reasoning.defaultEffort === undefined ? [{ key: 'provider-default', effort: undefined, label: t('effort.providerDefault') }] : [],
     ...reasoning.efforts.map((effort) => ({ key: `effort:${effort.id}`, effort: effort.id, label: effort.name })),
   ], [reasoning, t])
 
-  const busy = state.status === 'selecting'
+  // The selection submitted while the Host settles.
+  const pending = state.pending
+  const busy = pending !== null
 
   useEffect(() => {
     if (!open) return
@@ -282,6 +345,14 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
     return () => { document.removeEventListener('mousedown', closeOutside) }
   }, [open])
 
+  // Do not inherit a stale filter.
+  useLayoutEffect(() => {
+    if (!showSearch) {
+      setQuery('')
+      setHighlightedIndex(null)
+    }
+  }, [showSearch])
+
   /** The first focusable row a keyboard entry should land on: the checked one, else the first enabled. */
   const initialRow = (): HTMLElement | null | undefined =>
     menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"][aria-checked="true"]:not([disabled])')
@@ -291,18 +362,37 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
   // Focus intent for the next pane render: "drill" focuses the pane's checked
   // (or first enabled) row; "model"/"effort" return focus to that root cell.
   const paneFocus = useRef<'drill' | 'model' | 'effort' | null>(null)
+  const previousShowSearch = useRef(showSearch)
   useEffect(() => {
-    const intent = paneFocus.current
+    const changedSearchMode = previousShowSearch.current !== showSearch
+    previousShowSearch.current = showSearch
+    const intent = paneFocus.current ?? (changedSearchMode && pane === 'model' ? 'drill' : null)
     paneFocus.current = null
     if (!open || intent === null) return
     if (intent === 'drill') {
+      if (pane === 'model' && showSearch) {
+        searchRef.current?.focus()
+        return
+      }
       initialRow()?.focus()
       return
     }
     const cell = itemRefs.current[intent === 'effort' ? 1 : 0]
     if (cell !== undefined && cell !== null && !cell.disabled) cell.focus()
     else triggerRef.current?.focus()
-  }, [open, pane])
+  }, [open, pane, showSearch])
+
+  useEffect(() => {
+    const viewport = groupsRef.current
+    if (viewport === null) return
+    return observeStickyMenuGroups(viewport)
+  }, [available, open, pane, filteredGroups])
+
+  useLayoutEffect(() => {
+    if (open && pane === 'model' && activeModelIndex >= 0) {
+      itemRefs.current[activeModelIndex]?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [open, pane, activeModelIndex, visibleModels])
 
   // The menu is portaled to the body, so it must be placed against the
   // viewport by hand: anchored at the trigger's top-right, clamped inside the
@@ -310,7 +400,7 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
   // (first frame), it stays hidden at the origin so offsetWidth/offsetHeight
   // are real for the placement pass below.
   useLayoutEffect(() => {
-    if (!open) {
+    if (!available || !open) {
       setMenuPos(null)
       return
     }
@@ -329,11 +419,14 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
     place()
     window.addEventListener('scroll', place, true)
     window.addEventListener('resize', place)
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place)
+    if (menuRef.current !== null) observer?.observe(menuRef.current)
     return () => {
+      observer?.disconnect()
       window.removeEventListener('scroll', place, true)
       window.removeEventListener('resize', place)
     }
-  }, [open, pane, state])
+  }, [available, open, pane, state, query])
 
   if (!available) return null
 
@@ -342,18 +435,32 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
     load()
   }
   const show = (): void => {
+    setSelectionFocus(false)
     triggerRef.current?.focus()
-    setPane('root')
+    setQuery('')
+    setHighlightedIndex(null)
+    if (currentChoice === undefined) paneFocus.current = 'drill'
+    setPane(currentChoice === undefined ? 'model' : 'root')
     setOpen(true)
     reload()
+  }
+  const changeQuery = (next: string): void => {
+    setQuery(next)
+    setHighlightedIndex(0)
   }
   const close = (restoreFocus = false): void => {
     setOpen(false)
     setPane('root')
     if (restoreFocus) queueMicrotask(() => { triggerRef.current?.focus() })
   }
+  const closeAfterSelection = (): void => {
+    setSelectionFocus(true)
+    close(true)
+  }
   /** Enter a drilled pane, focusing its checked (or first enabled) row. */
   const drill = (next: 'model' | 'effort'): void => {
+    setQuery('')
+    setHighlightedIndex(null)
     paneFocus.current = 'drill'
     setPane(next)
   }
@@ -369,17 +476,34 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
     items[active === -1 ? offset > 0 ? 0 : items.length - 1 : (active + offset + items.length) % items.length]?.focus()
   }
   const onRootKeyDown = (event: React.KeyboardEvent): void => {
+    if (event.nativeEvent.isComposing) return
     if (event.key === 'Escape' && open) {
       event.preventDefault()
-      if (pane !== 'root') back(pane)
+      if (pane !== 'root' && currentChoice !== undefined) back(pane)
       else close(true)
       return
     }
     if (!open) return
+    if (pane === 'model' && showSearch && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault()
+      if (!busy && visibleModels.length > 0) {
+        setHighlightedIndex((activeModelIndex + (event.key === 'ArrowDown' ? 1 : -1) + visibleModels.length) % visibleModels.length)
+        searchRef.current?.focus()
+      }
+      return
+    }
+    if (pane === 'model' && showSearch && event.target instanceof HTMLInputElement
+      && (event.key === 'Enter' || (event.key === 'Tab' && !event.shiftKey))) {
+      if (event.key === 'Tab' && visibleModels.length === 0) return
+      event.preventDefault()
+      const highlighted = visibleModels[activeModelIndex]
+      if (!busy && highlighted !== undefined) choose(highlighted)
+      return
+    }
     if (event.key === 'Tab') {
       if (event.shiftKey) {
         event.preventDefault()
-        if (pane !== 'root') back(pane)
+        if (pane !== 'root' && currentChoice !== undefined) back(pane)
         else close(true)
         return
       }
@@ -393,6 +517,11 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
       }
       if (focused !== triggerRef.current) return
       event.preventDefault()
+      if (pane === 'model' && showSearch) {
+        setHighlightedIndex(null)
+        searchRef.current?.focus()
+        return
+      }
       initialRow()?.focus()
       return
     }
@@ -410,7 +539,7 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
   const settleSelection = (result: SelectOutcome): void => {
     if (result === undefined) return
     if (result.ok) {
-      if (rootRef.current !== null) close(true)
+      if (rootRef.current !== null) closeAfterSelection()
       return
     }
     const { error } = result
@@ -423,12 +552,13 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
   }
   const submit = (selection: { provider: string, model: string, reasoningEffort?: string }): void => {
     lastActionRef.current = 'select'
+    setSelectionFocus(true)
     triggerRef.current?.focus()
     void select(selection).then(settleSelection)
   }
   const choose = (selection: { provider: string, model: string, reasoningEffort?: string }): void => {
     if (state.current?.provider === selection.provider && state.current.model === selection.model) {
-      close(true)
+      closeAfterSelection()
       return
     }
     submit(selection)
@@ -436,7 +566,7 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
   const chooseEffort = (effort: string | undefined): void => {
     if (state.current === null) return
     if (effectiveEffort === effort) {
-      close(true)
+      closeAfterSelection()
       return
     }
     submit({
@@ -446,15 +576,13 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
     })
   }
 
-  const waiting = state.current === null && state.status === 'loading'
-  const modelLabel = waiting ? t('trigger.loading')
-    : currentChoice?.model.name ?? (state.current === null ? t('trigger.fallback') : `${state.current.provider}/${state.current.model}`)
+  const waiting = currentChoice === undefined && state.status === 'loading'
+  const modelLabel = waiting ? t('trigger.loading') : currentChoice?.model.name ?? t('trigger.fallback')
   const triggerAria = waiting ? t('trigger.loading')
-    : state.current === null ? t('trigger.selectAria')
+    : currentChoice === undefined ? t('trigger.selectAria')
       : effortLabel === undefined ? t('trigger.aria', { model: modelLabel })
         : t('trigger.ariaEffort', { model: modelLabel, effort: effortLabel })
 
-  itemRefs.current = []
   let itemIndex = 0
   const itemRef = () => {
     const at = itemIndex++
@@ -462,6 +590,7 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
       itemRefs.current[at] = node
     }
   }
+  let modelIndex = 0
 
   return h('div', {
     ref: rootRef,
@@ -483,6 +612,9 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
       'aria-expanded': open,
       'aria-controls': open ? `${id}-menu` : undefined,
       title: `${modelLabel}${effortLabel === undefined ? '' : ` · ${effortLabel}`}`,
+      'aria-busy': busy,
+      'data-selection-focus': selectionFocus ? '' : undefined,
+      onBlur: () => { setSelectionFocus(false) },
       disabled: locked,
       onClick: () => { if (open) close(true); else show() },
     },
@@ -494,14 +626,14 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
       effortLabel !== undefined ? h('span', { className: 'cbms-triggerEffort' }, effortLabel) : null,
       h(IconChevronDownOutlineRegular, { className: `cbms-chevron${open ? ' cbms-chevronOpen' : ''}` }),
     ),
-    open ? createPortal(h('div', {
+    open ? createPortal(h(MenuSurface, {
       ref: menuRef,
       id: `${id}-menu`,
       className: 'cbms-menu',
       // Before the placement pass lands, stay hidden at the origin so the
       // menu can be measured (offsetWidth/offsetHeight) without a flash.
       style: menuPos ?? { visibility: 'hidden', left: 0, top: 0 },
-      role: 'menu',
+      role: pane === 'model' ? 'group' : 'menu',
       'aria-label': t('menu.aria'),
       'aria-busy': state.status === 'loading' || busy,
     },
@@ -511,7 +643,8 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
           onClick: () => { drill('model') },
         },
           h('span', { className: 'cbms-cellLabel' }, t('menu.model')),
-          h('span', { className: 'cbms-cellValue' }, modelLabel),
+          h('span', { className: 'cbms-cellValue' },
+            currentChoice === undefined ? modelLabel : currentChoice.model.name),
           h(IconChevronRightOutlineRegular, { className: 'cbms-cellChevron' }),
         ),
         reasoning !== undefined ? h('button', {
@@ -524,24 +657,54 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
         ) : null,
       ) : null,
       pane === 'model' ? h(Fragment, null,
+        showSearch ? h('div', { className: 'cbms-searchRow' },
+          h(Input, {
+            ref: searchRef,
+            className: `cbms-search${query !== '' ? ' cbms-searchWithQuery' : ''}`,
+            type: 'text',
+            role: 'searchbox',
+            'aria-label': t('search.placeholder'),
+            'aria-controls': `${id}-models`,
+            'aria-activedescendant': activeModelIndex < 0 ? undefined : `${id}-model-${activeModelIndex}`,
+            placeholder: t('search.placeholder'),
+            value: query,
+            readOnly: busy,
+            onChange: (event: React.ChangeEvent<HTMLInputElement>) => { changeQuery(event.currentTarget.value) },
+          }),
+          query !== '' ? h('button', {
+            type: 'button',
+            className: 'cbms-searchClear',
+            'aria-label': t('search.clear'),
+            disabled: busy,
+            onClick: () => {
+              changeQuery('')
+              searchRef.current?.focus()
+            },
+          }, h(IconCloseFillRegular, {})) : null,
+        ) : null,
         state.status === 'loading' ? h('div', { className: 'cbms-status' }, t('status.loading')) : null,
         state.error !== null && lastActionRef.current === 'load' ? h('div', { className: 'cbms-error' },
           h('span', null, t('error.action', { message: state.error })),
           h('button', { type: 'button', className: 'cbms-retry', onClick: reload }, t('action.reload')),
         ) : null,
         state.failures.map((failure) => h('div', { className: 'cbms-warning', key: failure.id },
-          h('span', null, t('warning.groupLoad', { name: failure.name, message: failure.message })),
+          h('span', null, t('warning.groupLoad', {
+            name: failure.id === ACCOUNT_PROVIDER ? t('provider.account') : failure.name,
+            message: failure.message,
+          })),
           h('button', { type: 'button', className: 'cbms-retry', onClick: reload }, t('action.reload')),
         )),
-        h('div', { className: 'cbms-groups scrollable' },
-          state.groups.map((group) => h('section', {
-            role: 'group',
-            'aria-labelledby': `${id}-${group.id}`,
-            className: 'cbms-group',
-            key: group.id,
-          },
-            h('div', { className: 'cbms-groupTitle', id: `${id}-${group.id}` }, group.name),
+        h('div', {
+          ref: groupsRef,
+          id: `${id}-models`,
+          className: 'cbms-groups scrollable',
+          role: 'menu',
+          'aria-label': t('menu.model'),
+          hidden: filteredGroups.length === 0,
+        },
+          filteredGroups.map((group) => h(MenuGroup, { key: group.id, label: group.provider.name },
             group.models.map((model) => {
+              const index = modelIndex++
               const selected = state.current?.provider === group.id && state.current.model === model.id
               // Keyed `provider/model`, so other providers' rows never match.
               const extra = enriched.get(`${group.id}/${model.id}`)
@@ -559,7 +722,15 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
                 type: 'button',
                 role: 'menuitemradio',
                 'aria-checked': selected,
-                className: `cbms-option${selected ? ' cbms-selected' : ''}`,
+                id: `${id}-model-${index}`,
+                tabIndex: showSearch ? -1 : 0,
+                onFocus: () => { setHighlightedIndex(index) },
+                'data-highlighted': index === activeModelIndex ? '' : undefined,
+                // Hover stays off model rows; the highlighted row owns the background.
+                className: `cbms-option cbms-modelOption${selected ? ' cbms-selected' : ''}${index === activeModelIndex ? ' cbms-optionActive' : ''}`,
+                onMouseMove: busy || index === activeModelIndex
+                  ? undefined
+                  : () => { if (showSearch) setHighlightedIndex(index); else itemRefs.current[index]?.focus() },
                 disabled: busy,
                 onClick: () => { choose({ provider: group.id, model: model.id }) },
               },
@@ -577,7 +748,10 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
                 ),
                 // The selection check comes before the rate, so an
                 // unselected row's multiplier sits flush right.
-                h('span', { className: 'cbms-check' }, selected ? h(IconCheckOutlineRegular, null) : null),
+                h('span', { className: 'cbms-check' },
+                  pending !== null && pending.provider === group.id && pending.model === model.id
+                    ? h(StateDot, { state: 'ongoing' })
+                    : selected ? h(IconCheckOutlineRegular, null) : null),
                 rate !== undefined ? h('span', {
                   className: `cbms-credits${rate.promo ? ' cbms-creditsPromo' : rate.free ? ' cbms-creditsFree' : ''}`,
                   ...rate.tint === undefined ? {} : { style: { color: rate.tint } },
@@ -586,7 +760,10 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
             }),
           )),
         ),
-        state.status === 'ready' && choices.length === 0 ? h('div', { className: 'cbms-empty' }, t('empty.models')) : null,
+        state.status === 'ready' && filteredGroups.length === 0 ? h('div', {
+          className: 'cbms-empty',
+          role: 'status',
+        }, t(choices.length === 0 ? 'empty.models' : 'search.empty')) : null,
       ) : null,
       pane === 'effort' ? h(Fragment, null,
         state.error !== null && lastActionRef.current === 'load' ? h('div', { className: 'cbms-error' },
@@ -608,7 +785,13 @@ export function CodeBuddyModelSelect({ locked, available, directory, load, selec
             h('span', { className: 'cbms-optionCopy' },
               h('span', { className: 'cbms-modelName' }, level.label),
             ),
-            h('span', { className: 'cbms-check' }, selected ? h(IconCheckOutlineRegular, null) : null),
+            h('span', { className: 'cbms-check' },
+              pending !== null
+                && pending.provider === state.current?.provider
+                && pending.model === state.current.model
+                && pending.reasoningEffort === level.effort
+                ? h(StateDot, { state: 'ongoing' })
+                : selected ? h(IconCheckOutlineRegular, null) : null),
           )
         }),
       ) : null,
@@ -629,7 +812,7 @@ export const MODEL_SELECT_CSS = `
 .cbms-root{min-width:0;position:relative}
 .cbms-trigger{min-width:0;max-width:min(360px,45cqw);height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:24px;outline:none;align-items:center;gap:4px;padding:0 4px 0 8px;font-size:13px;font-weight:500;line-height:20px;display:flex}
 .cbms-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
-.cbms-trigger:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-border-l3)}
+.cbms-trigger:focus-visible:not([data-selection-focus]){box-shadow:0 0 0 2px var(--dsw-alias-border-l3)}
 .cbms-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
 .cbms-triggerLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}
 .cbms-triggerEffort{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-caption);flex-shrink:1000;overflow:hidden}
@@ -637,16 +820,22 @@ export const MODEL_SELECT_CSS = `
 .cbms-triggerLabel,.cbms-triggerEffort{display:var(--dsh-composer-model-text-display,block)}
 .cbms-chevron{color:var(--dsw-alias-label-caption);flex:none;transition:transform .12s}
 .cbms-chevronOpen{transform:rotate(180deg)}
-.cbms-menu{z-index:1100;background:var(--dsw-specific-menu);-webkit-backdrop-filter:var(--dsw-menu-backdrop-filter);backdrop-filter:var(--dsw-menu-backdrop-filter);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);width:max-content;min-width:min(300px,100vw - 32px);max-width:min(460px,100vw - 32px);max-height:min(360px,100vh - 96px);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2);border:0;border-radius:16px;flex-direction:column;padding:3px;display:flex;position:fixed;overflow:hidden}
+.cbms-menu{z-index:1100;--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);width:max-content;min-width:min(300px,100vw - 32px);max-width:min(460px,100vw - 32px);max-height:min(360px,100vh - 96px);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2);border:0;border-radius:16px;flex-direction:column;padding:3px;display:flex;position:fixed;overflow:hidden}
 .cbms-status,.cbms-empty{color:var(--dsw-alias-label-tertiary);padding:8px;font-size:12px;line-height:18px}
 .cbms-error,.cbms-warning{background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);border-radius:7px;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:3px;padding:6px 7px;font-size:11px;line-height:16px;display:flex}
 .cbms-warning{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-state-warn-label)}
 .cbms-retry{color:inherit;font:inherit;cursor:pointer;background:0 0;border:none;flex:none;padding:0;font-weight:600}
+.cbms-searchRow{flex-shrink:0;margin:2px 0 3px;position:relative}
+.cbms-searchRow .cbms-search{border-radius:8px;background:0 0;border:0 solid #0000;height:auto;padding:5px 7px;display:flex}
+.cbms-searchRow .cbms-searchWithQuery{padding-right:34px}
+.cbms-searchClear{width:24px;height:24px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:50%;justify-content:center;align-items:center;padding:0;display:inline-flex;position:absolute;top:50%;right:4px;transform:translateY(-50%)}
+.cbms-searchClear:hover,.cbms-searchClear:focus-visible{background:var(--dsw-alias-interactive-bg-hover);outline:none}
+.cbms-searchRow .cbms-search:focus-within{border-color:#0000}
+.cbms-searchRow .cbms-search input{padding:0;font-size:12px;line-height:normal}
+.cbms-searchRow .cbms-search input::placeholder{color:var(--dsw-alias-label-caption)}
 .cbms-groups{min-height:0;overflow-y:auto}
-.cbms-group+.cbms-group{margin-top:3px}
-.cbms-groupTitle{z-index:1;background:var(--dsw-specific-menu);color:var(--dsw-alias-label-tertiary);padding:4px 7px 2px;font-size:11px;font-weight:500;line-height:16px;position:sticky;top:0}
 .cbms-option{box-sizing:border-box;width:auto;min-width:100%;min-height:34px;color:inherit;text-align:left;cursor:pointer;background:0 0;border:none;border-radius:8px;outline:none;align-items:center;gap:6px;padding:5px 7px;display:flex}
-.cbms-option:hover:not(:disabled),.cbms-option:focus-visible{background:var(--dsw-alias-interactive-bg-hover)}
+.cbms-option:not(.cbms-modelOption):hover:not(:disabled),.cbms-option:focus-visible,.cbms-optionActive:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .cbms-selected{background:0 0}
 .cbms-option:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
 .cbms-optionCopy{align-items:center;gap:6px;min-width:0;flex:1;display:flex}

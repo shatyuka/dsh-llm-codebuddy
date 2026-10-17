@@ -101,9 +101,10 @@ export function createUsagePrefs(form: ConfigForm<CodeBuddySettings>): UsagePref
 
   // `loading` counts as persistent: a notice before the first Host answer
   // would be noise. Only a settled non-writable form reports not persisted.
+  // A non-persistent connection reports `unavailable` and is never writable.
   const persistent = (): boolean => {
     const snapshot = form.getSnapshot()
-    return snapshot.status === 'loading' || (snapshot.mode === 'host' && snapshot.writable)
+    return snapshot.status === 'loading' || snapshot.writable
   }
   let lastPersistent = persistent()
 
