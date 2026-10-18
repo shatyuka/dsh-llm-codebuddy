@@ -35,6 +35,8 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { CodeBuddyModelSelect, MODEL_SELECT_CSS } from './model-select.js'
 import type { ModelSelectT } from './model-select.js'
+import { LABEL_SLOT } from './label-outlet.js'
+import type { LabelSlotFace } from './label-outlet.js'
 import { badgesOf, creditsOf, rowRate } from './model-badges.js'
 import { moveModelId, orderModelsById, placeModelAt } from './model-order.js'
 import { createCodeBuddyPrefs, useCodeBuddyPrefs, usePersistentPrefs } from './prefs.js'
@@ -1430,6 +1432,26 @@ export function apply(ctx: Context): void {
     // Copy comes from the official `model` namespace, keeping the shell's own
     // wording (and any future key changes) for free.
     const modelT: ModelSelectT = ctx.locale.bind('model')
+    // The official seat owns the `conversation.input.model.label` declaration;
+    // a shadowing seat may not declare the same child (the slot core rejects a
+    // duplicate). The declaration survives shadowing, so read its winning
+    // contributor through the public registry surface instead. Both reads are
+    // closed over stable objects, so the outlet's uSES subscribe pairs stay
+    // referentially stable across renders.
+    const locale = ctx.locale
+    const labelSlot: LabelSlotFace = {
+      slots: {
+        subscribe: (listener) => scope.slots.subscribe(LABEL_SLOT, listener),
+        version: () => scope.slots.getVersion(LABEL_SLOT),
+        winner: () => scope.slots.entriesOfSlot(LABEL_SLOT)[0],
+        survivors: () => scope.slots.entries(LABEL_SLOT),
+      },
+      locale: {
+        subscribe: (listener) => locale.subscribe(listener),
+        revision: () => locale.getSnapshot().revision,
+        bind: (namespace) => locale.bind(namespace),
+      },
+    }
     scope.slots.inject('conversation.input.model', () => scope.slots.register({
       name: 'conversation.input.model',
       // Shadowing requires a lower priority than the shipped default 0.
@@ -1444,13 +1466,14 @@ export function apply(ctx: Context): void {
             directory.select(selection),
         }
       },
-    }, (props: Omit<Parameters<typeof CodeBuddyModelSelect>[0], 'rpc' | 't' | 'prefs'>) =>
+    }, (props: Omit<Parameters<typeof CodeBuddyModelSelect>[0], 'rpc' | 't' | 'prefs' | 'labelSlot'>) =>
       CodeBuddyModelSelect({
         ...props,
         rpc: enrichedRpc,
         t: modelT,
         // Same store as the settings page, so edits land live.
         prefs,
+        labelSlot,
       })))
   })
 }

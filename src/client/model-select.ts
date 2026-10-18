@@ -29,9 +29,11 @@ import {
   Toast,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { ModelSelectInjected } from '@deepseek-ai/dsh-client-ui-model-selection/client'
+import type { ModelLabelOwner, ModelSelectInjected } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { Translate, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { CODEBUDDY_PROVIDER } from '../constants.js'
+import { ModelLabelOutlet } from './label-outlet.js'
+import type { LabelSlotFace } from './label-outlet.js'
 import { badgesOf, creditsOf, rowRate } from './model-badges.js'
 import { orderModelsById } from './model-order.js'
 import { useCodeBuddyPrefs } from './prefs.js'
@@ -196,11 +198,16 @@ export function CodeBuddyModelSelect({
   rpc,
   t,
   prefs,
+  labelSlot,
+  // Session standard shares the label contributors expect (sessionId and the
+  // Session hooks), forwarded untouched to the shadowed label slot.
+  ...standard
 }: {
   locked: boolean
   rpc: EnrichedCatalogRpc
   t: ModelSelectT
   prefs: CodeBuddyPrefs
+  labelSlot: LabelSlotFace
 } & ModelDirectoryFace): ReactElement | null {
   const state = useSyncExternalStore(
     (fn) => directory.subscribe(fn),
@@ -238,6 +245,20 @@ export function CodeBuddyModelSelect({
     })),
     [state.groups, accountProviderName],
   )
+
+  /** Render one trigger/menu/option name through the shadowed label slot. */
+  const renderLabel = (
+    provider: ModelLabelOwner['provider'],
+    model: ModelLabelOwner['model'],
+    placement: ModelLabelOwner['placement'],
+    selected: boolean,
+  ): ReactElement => h(ModelLabelOutlet, {
+    key: `${provider.id}/${model.id}/${placement}`,
+    face: labelSlot,
+    owner: { provider, model, placement, selected },
+    standard: standard as unknown as Record<string, unknown>,
+    fallback: model.name,
+  })
 
   // Durable arrangement of this provider's rows, owned by the settings page.
   // The seat re-renders as the arrangement changes, so an edit while the menu
@@ -601,7 +622,10 @@ export function CodeBuddyModelSelect({
       // compact-mode CSS variables, so the seat folds to icon-only with the
       // rest of the composer controls.
       h(IconDataOutlineRegular, { className: 'cbms-triggerIcon', size: 16 }),
-      h('span', { className: 'cbms-triggerLabel' }, modelLabel),
+      h('span', { className: 'cbms-triggerLabel' },
+        currentChoice === undefined
+          ? modelLabel
+          : renderLabel(currentChoice.group.provider, currentChoice.model, 'trigger', true)),
       effortLabel !== undefined ? h('span', { className: 'cbms-triggerEffort' }, effortLabel) : null,
       h(IconChevronDownOutlineRegular, { className: `cbms-chevron${open ? ' cbms-chevronOpen' : ''}` }),
     ),
@@ -623,7 +647,9 @@ export function CodeBuddyModelSelect({
         },
           h('span', { className: 'cbms-cellLabel' }, t('menu.model')),
           h('span', { className: 'cbms-cellValue' },
-            currentChoice === undefined ? modelLabel : currentChoice.model.name),
+            currentChoice === undefined
+              ? modelLabel
+              : renderLabel(currentChoice.group.provider, currentChoice.model, 'menu', true)),
           h(IconChevronRightOutlineRegular, { className: 'cbms-cellChevron' }),
         ),
         reasoning !== undefined ? h('button', {
@@ -714,7 +740,8 @@ export function CodeBuddyModelSelect({
                 onClick: () => { choose({ provider: group.id, model: model.id }) },
               },
                 h('span', { className: 'cbms-optionCopy' },
-                  h('span', { className: 'cbms-modelName' }, model.name),
+                  h('span', { className: 'cbms-modelName' },
+                    renderLabel(group.provider, model, 'option', selected)),
                   badges.map((badge) => h('span', {
                     key: badge.key, className: 'cbms-tag',
                     style: { color: badge.color, borderColor: badge.color },
