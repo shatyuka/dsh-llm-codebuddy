@@ -133,7 +133,7 @@ describe('apply', () => {
           return () => {}
         },
       },
-      get: () => undefined,
+      get: (_name: string): unknown => undefined,
       emit: (event: string) => { emitted.push(event) },
       effect: (fn: () => unknown, label?: string) => {
         effects.push(label ?? '')
@@ -176,6 +176,30 @@ describe('apply', () => {
     apply(ctx as never)
     expect(ctx.registered).toHaveLength(1)
     expect(ctx.registered[0]?.providers).toEqual([CODEBUDDY_PROVIDER])
+  })
+
+  /** The option thunk the mount handed the adapter. */
+  function mountedTurnOf(ctx: ReturnType<typeof contextOf>) {
+    return (ctx.registered[0]!.adapter as { config: { turnOf?: () => ((id: string) => number | undefined) | undefined } })
+      .config.turnOf
+  }
+
+  it('wires a turn reader that reads the host registries', () => {
+    const ctx = {
+      ...contextOf(),
+      get: (name: string) => name === 'sessions'
+        ? { get: () => ({ id: 'sess-1' }) }
+        : name === 'sessionProjections' ? { stateOf: () => ({ lastTurn: 4 }) } : undefined,
+    }
+    apply(ctx as never)
+    expect(mountedTurnOf(ctx)?.()?.('sess-1')).toBe(4)
+  })
+
+  it('wires a turn reader that degrades without the registries', () => {
+    const ctx = contextOf()
+    apply(ctx as never)
+    // Absent services leave the reader undefined rather than failing the mount.
+    expect(mountedTurnOf(ctx)?.()).toBeUndefined()
   })
 
   it('fails at load on a bad config rather than mid-request', () => {

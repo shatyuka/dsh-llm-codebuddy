@@ -11,6 +11,7 @@
  * @module dsh-llm-codebuddy/adapter
  */
 
+import { createHash } from 'node:crypto'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
   isContextWindowExceededError,
@@ -77,6 +78,11 @@ export interface CodeBuddyAdapterOptions {
    * re-registration. A BCP 47 tag; absence means English.
    */
   language?: () => string | undefined
+  /**
+   * Resolves the session's turn reader, re-read per request so a host that
+   * registers the registries after this plugin loads is still picked up.
+   */
+  turnOf?: (() => CodeBuddyTurnReader | undefined) | undefined
 }
 
 /** Parse a `retry-after` header into milliseconds, when it carries a usable delay. */
@@ -93,6 +99,23 @@ function providerRetryAfterMs(value: string | null): number | undefined {
 function requestId(headers: Headers): ReturnType<typeof ProviderRequestId> | undefined {
   const value = headers.get('x-request-id') ?? headers.get('x-requestid')
   return value === null || value.length === 0 ? undefined : ProviderRequestId(value)
+}
+
+/** Reads one session's current turn number, or `undefined` when it cannot be named. */
+export type CodeBuddyTurnReader = (sessionId: string) => number | undefined
+
+/**
+ * The `x-conversation-request-id` value: one identity per turn, shared by that
+ * turn's requests. Unreadable turn means no header — a guessed id would split
+ * or merge turns in the service's grouping.
+ * @param sessionId - the request's session, when it has one.
+ * @param turnOf - the host turn reader, when one is configured.
+ * @returns the request id, or `undefined` when no turn is readable.
+ */
+function turnRequestId(sessionId: string | undefined, turnOf: CodeBuddyTurnReader | undefined): string | undefined {
+  const turn = sessionId === undefined || turnOf === undefined ? undefined : turnOf(sessionId)
+  if (turn === undefined) return undefined
+  return createHash('sha256').update(`${sessionId}#${turn}`).digest('hex').slice(0, 32)
 }
 
 /** Whether any message in the conversation carries retained image content. */
@@ -446,6 +469,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
     let response: Response
     // The credential's site decides the host; an explicit `baseURL` wins.
     const chatBase = connection.baseURL ?? `${endpointOf(identity.site)}/v2`
+    const requestTurnId = turnRequestId(options.sessionId, this.config.turnOf?.())
     try {
       response = await fetch(`${chatBase}/chat/completions`, {
         method: 'POST',
@@ -454,8 +478,9 @@ export class CodeBuddyAdapter extends LlmAdapter {
           'content-type': 'application/json',
           'accept': 'text/event-stream',
           'user-agent': CODEBUDDY_IDE_USER_AGENT,
-          ...options.sessionId === undefined ? {} : { 'X-Conversation-ID': options.sessionId },
           'X-Model-ID': options.model,
+          ...options.sessionId === undefined ? {} : { 'X-Conversation-ID': options.sessionId },
+          ...requestTurnId === undefined ? {} : { 'X-Conversation-Request-ID': requestTurnId },
         },
         body: payload,
         ...options.signal === undefined ? {} : { signal: options.signal },

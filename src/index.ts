@@ -13,7 +13,7 @@ import z from '@deepseek-ai/schemastery'
 import { resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { CodeBuddyAdapter } from './adapter.js'
-import type { CodeBuddyConnectionOptions } from './adapter.js'
+import type { CodeBuddyConnectionOptions, CodeBuddyTurnReader } from './adapter.js'
 import { CodeBuddyAuthService } from './auth-service.js'
 import {
   CODEBUDDY_PROVIDER,
@@ -35,7 +35,7 @@ import {
 import type { CreditUnit } from './settings.js'
 
 export { CodeBuddyAdapter, httpErrorCode } from './adapter.js'
-export type { CodeBuddyAdapterOptions, CodeBuddyConnectionOptions } from './adapter.js'
+export type { CodeBuddyAdapterOptions, CodeBuddyConnectionOptions, CodeBuddyTurnReader } from './adapter.js'
 export { CodeBuddyAuthService, CODEBUDDY_AUTH_CHANNEL } from './auth-service.js'
 export type {
   CodeBuddyAuthStatus,
@@ -166,6 +166,29 @@ export function resolveConnectionOptions(config: Config = {}): CodeBuddyConnecti
   }
 }
 
+/**
+ * Read the agent loop's turn counter through the host registries.
+ *
+ * Probed softly: a deployment without these services still serves requests, so
+ * a missing registry yields `undefined` rather than a load failure.
+ * @param ctx - the plugin context.
+ * @returns the reader, or `undefined` when the host does not expose one.
+ */
+function turnLookupOf(ctx: { get(name: string): unknown }): CodeBuddyTurnReader | undefined {
+  const sessions = ctx.get('sessions') as { get?(id: string): { id?: unknown } | undefined }
+  const projections = ctx.get('sessionProjections') as
+    { stateOf?(session: unknown, key: string): { lastTurn?: unknown } | undefined }
+  if (typeof sessions?.get !== 'function' || typeof projections?.stateOf !== 'function') return undefined
+  return (sessionId) => {
+    const session = sessions.get!(sessionId)
+    // A cold or unattached session has no live projection state.
+    if (session === undefined || session === null) return undefined
+    const turn = projections.stateOf!(session, 'turnBoundary')?.lastTurn
+    // Zero means no turn has opened yet; it names nothing.
+    return typeof turn === 'number' && Number.isInteger(turn) && turn > 0 ? turn : undefined
+  }
+}
+
 /** How often the plugin re-reads the catalog to notice server-side edits, in ms. */
 const CATALOG_POLL_INTERVAL_MS = 5 * 60 * 1000
 
@@ -180,6 +203,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     session,
     options: () => resolved,
     resolveAttachments: () => ctx.get('attachments'),
+    turnOf: () => turnLookupOf(ctx),
     language: () => messageLocale.tag(),
   })
 

@@ -29,11 +29,16 @@ function sessionOf(over: {
   }
 }
 
-function adapterOf(session: ReturnType<typeof sessionOf>, connection: CodeBuddyConnectionOptions = DEFAULT_CONNECTION) {
+function adapterOf(
+  session: ReturnType<typeof sessionOf>,
+  connection: CodeBuddyConnectionOptions = DEFAULT_CONNECTION,
+  turnOf?: (sessionId: string) => number | undefined,
+) {
   return new CodeBuddyAdapter({
     session: session as never,
     options: () => connection,
     language: () => undefined,
+    ...turnOf === undefined ? {} : { turnOf: () => turnOf },
   })
 }
 
@@ -255,6 +260,107 @@ describe('stream — request construction', () => {
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('https://proxy.example/v2/chat/completions')
     expect(init.headers).toMatchObject({ 'X-Conversation-ID': 'session-1' })
+  })
+
+  it('sends one X-Conversation-Request-ID per turn and nothing else', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } })
+    const adapter = adapterOf(sessionOf(), DEFAULT_CONNECTION, () => 2)
+
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
+
+    const first = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>
+    // CodeBuddy's 32-hex shape, hashed rather than echoing the turn number.
+    expect(first['X-Conversation-Request-ID']).toMatch(/^[0-9a-f]{32}$/)
+    // The trace family is deliberately not sent; the request id travels alone.
+    for (const name of ['x-trace-id', 'b3', 'x-b3-traceid', 'x-b3-spanid', 'x-b3-parentspanid', 'x-b3-sampled']) {
+      expect(first[name]).toBeUndefined()
+    }
+  })
+
+  it('gives each turn its own request id while keeping one turn stable', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = createUserMessage({ content: [{ type: 'text', text: 'one' }], source: { kind: 'user' } })
+    let turn = 1
+    const adapter = adapterOf(sessionOf(), DEFAULT_CONNECTION, () => turn)
+
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 's' })
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 's' })
+    turn = 2
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 's' })
+
+    const [one, again, two] = fetchMock.mock.calls.map(call =>
+      ((call as unknown as [string, RequestInit])[1].headers as Record<string, string>)['X-Conversation-Request-ID'])
+    expect(again).toBe(one)
+    expect(two).not.toBe(one)
+  })
+
+  it('names the turn from the host counter, ignoring mid-turn human messages', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+    // A steer: a second human message inside the same turn. The counter does not move.
+    const steer = createUserMessage({ content: [{ type: 'text', text: 'also' }], source: { kind: 'user' } })
+    const adapter = adapterOf(sessionOf(), DEFAULT_CONNECTION, () => 7)
+
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user, steer], sessionId: 'sess-1' })
+
+    const [first, second] = fetchMock.mock.calls.map(call =>
+      ((call as unknown as [string, RequestInit])[1].headers as Record<string, string>)['X-Conversation-Request-ID'])
+    // One turn, one id — the steer must not split it.
+    expect(second).toBe(first)
+  })
+
+  it('scopes the turn counter to its session', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+    const adapter = adapterOf(sessionOf(), DEFAULT_CONNECTION, () => 1)
+
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-a' })
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-b' })
+
+    const [a, b] = fetchMock.mock.calls.map(call =>
+      ((call as unknown as [string, RequestInit])[1].headers as Record<string, string>)['X-Conversation-Request-ID'])
+    // Turn 1 of two different sessions must not collide.
+    expect(a).not.toBe(b)
+  })
+
+  it('picks up a turn reader that the host registers after construction', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+    // The registries are not mounted when the plugin loads, only afterwards.
+    let reader: ((sessionId: string) => number | undefined) | undefined
+    const adapter = new CodeBuddyAdapter({
+      session: sessionOf() as never,
+      options: () => DEFAULT_CONNECTION,
+      language: () => undefined,
+      turnOf: () => reader,
+    })
+
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
+    expect(((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>)['X-Conversation-Request-ID']).toBeUndefined()
+
+    reader = () => 3
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
+    expect(((fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].headers as Record<string, string>)['X-Conversation-Request-ID']).toMatch(/^[0-9a-f]{32}$/)
+  })
+
+  it('omits the request id when the host cannot name the turn', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+    // A cold session: the lookup cannot resolve a turn.
+    const adapter = adapterOf(sessionOf(), DEFAULT_CONNECTION, () => undefined)
+
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
+
+    const headers = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>
+    expect(headers['X-Conversation-Request-ID']).toBeUndefined()
   })
 
   it('uses the international host for an international credential', async () => {
