@@ -53,6 +53,11 @@ function userMessage(blocks: readonly ContentBlock[]) {
   return createUserMessage({ content: blocks, source: { kind: 'user' } })
 }
 
+/** An injected context message: the same role, a foreign source. */
+function contextMessage(text: string) {
+  return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'runtime-context' } as never })
+}
+
 function optionsOf(over: Partial<GenerateOptions> = {}): GenerateOptions {
   return {
     provider: 'codebuddy',
@@ -199,38 +204,81 @@ describe('serializeMessages — images', () => {
     expect(parts[1]?.image_url?.url).toBe('data:image/png;base64,AQID')
   })
 
-  it('forwarded earlier images ride the last user turn, keeping catalog order', () => {
-    // Some services only honour image content in the final user message.
+  it('keeps each image in the message that carried it', () => {
+    // The service reads a turn's final user message as the human input and
+    // routes on its images, so an image must not migrate onto another message.
     const wire = serializeMessages([
       userMessage([{ type: 'image', attachment: imageRef('early') as never }]),
+      contextMessage('context'),
       createAssistantMessage({ content: [{ type: 'text', text: 'ok' }], source: { provider: 'x', model: 'm' } }),
-      userMessage([{ type: 'text', text: 'last' }, { type: 'image', attachment: imageRef('late') as never }]),
-    ], true, new Map([
-      ['early', requestImage('early', [1])],
-      ['late', requestImage('late', [2])],
-    ]))
+      userMessage([{ type: 'text', text: 'later' }]),
+    ], true, new Map([['early', requestImage('early', [1])]]))
 
-    const lastUser = [...wire].reverse().find(message => message.role === 'user')
-    const parts = lastUser?.content as { type: string, image_url?: { url: string } }[]
-    const urls = parts.filter(part => part.type === 'image_url').map(part => part.image_url?.url)
-    expect(urls).toEqual(['data:image/png;base64,AQ==', 'data:image/png;base64,Ag=='])
+    // The closed turn keeps its position, so the image stays put and the open
+    // turn's reordering does not reach back across the assistant message.
+    expect(wire.map(message => message.role)).toEqual(['user', 'user', 'assistant', 'user'])
+    const parts = wire[0]?.content as { type: string, image_url?: { url: string } }[]
+    expect(parts.filter(part => part.type === 'image_url').map(part => part.image_url?.url))
+      .toEqual(['data:image/png;base64,AQ=='])
+    // Within the open turn the context comes first and the human input last.
+    expect(wire[1]?.content).toBe('context')
+    expect(wire[3]?.content).toBe('later')
   })
 
-  it('leaves an earlier image turn as its handle text, so a later tool result still follows a user turn', () => {
-    // The image is not simply dropped: it projects to the handle text that
-    // names it, so the earlier turn keeps a non-empty user entry and the tool
-    // result below still follows one.
+  it('puts the human input after injected context of the same turn', () => {
+    const wire = serializeMessages([
+      userMessage([{ type: 'text', text: 'real ask' }]),
+      contextMessage('context'),
+    ], false)
+
+    expect(wire.map(message => message.content)).toEqual(['context', 'real ask'])
+  })
+
+  it('leaves a turn with no human input in its existing order', () => {
     const wire = serializeMessages([
       userMessage([{ type: 'image', attachment: imageRef('only') as never }]),
       createToolResultMessage({ callId: ToolCallId('c'), content: [{ type: 'text', text: 'r' }], isError: false }),
-      userMessage([{ type: 'text', text: 'go on' }]),
     ], true, new Map([['only', requestImage('only')]]))
 
-    expect(wire[0]).toMatchObject({ role: 'user' })
-    expect(typeof wire[0]?.content).toBe('string')
-    expect(wire[0]?.content).toContain('only')
-    expect(wire[0]?.content).not.toContain('image_url')
+    // Every message is injected, so there is nothing to move: the image stays
+    // in place and the tool result still follows it.
+    expect(Array.isArray(wire[0]?.content)).toBe(true)
     expect(wire[1]).toEqual({ role: 'tool', tool_call_id: 'c', content: 'r' })
+  })
+
+  it('still moves the human input when the request ends with a tool result', () => {
+    // The common path: a step that called a tool leaves assistant and tool
+    // messages after the turn's user messages, so the open turn is not the
+    // array tail.
+    const wire = serializeMessages([
+      userMessage([{ type: 'text', text: 'real ask' }]),
+      contextMessage('context'),
+      createAssistantMessage({ content: [{ type: 'text', text: 'ok' }], source: { provider: 'x', model: 'm' } }),
+      createToolResultMessage({ callId: ToolCallId('c'), content: [{ type: 'text', text: 'out' }], isError: false }),
+    ], false)
+
+    expect(wire.map(message => message.content)).toEqual(['context', 'real ask', 'ok', 'out'])
+    expect(wire.map(message => message.role)).toEqual(['user', 'user', 'assistant', 'tool'])
+  })
+
+  it('leaves closed turns in the order they were already sent', () => {
+    // Reordering history would change the prompt prefix on every request and
+    // drop the provider's prompt cache. Only the open turn is rearranged.
+    const wire = serializeMessages([
+      userMessage([{ type: 'text', text: 'first ask' }]),
+      contextMessage('first context'),
+      createAssistantMessage({ content: [{ type: 'text', text: 'done' }], source: { provider: 'x', model: 'm' } }),
+      userMessage([{ type: 'text', text: 'second ask' }]),
+      contextMessage('second context'),
+    ], false)
+
+    expect(wire.map(message => message.content)).toEqual([
+      'first ask',
+      'first context',
+      'done',
+      'second context',
+      'second ask',
+    ])
   })
 
   it('keeps a tool result image in place rather than forwarding it', () => {

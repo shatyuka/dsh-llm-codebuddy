@@ -222,11 +222,61 @@ function userContent(parts: readonly WireContentPart[]): string | WireContentPar
 }
 
 /**
+ * Move the human's input to the end of the open turn's user messages.
+ *
+ * CodeBuddy reads a turn's final user message as the human input. A turn emits
+ * that message followed by injected context, so without this the service sees
+ * the clock reading as the ask.
+ *
+ * Only the open turn moves: reordering closed turns would change the prompt
+ * prefix every request and drop the provider's cache.
+ * @param messages - the projected conversation in session order.
+ * @returns the reordered conversation.
+ */
+function humanInputLast(messages: readonly RequestMessage[]): readonly RequestMessage[] {
+  // The open turn is the last run of adjacent user messages, wherever the
+  // request ends: a step that called a tool leaves assistant and tool messages
+  // after it, and the human input must still lead them.
+  let end = messages.length - 1
+  while (end >= 0 && messages[end]?.role !== 'user') end--
+  if (end < 0) return messages
+  let start = end
+  while (start > 0 && messages[start - 1]?.role === 'user') start--
+  let human = -1
+  for (let i = start; i <= end; i++) {
+    if (isHumanInput(messages[i])) human = i
+  }
+  if (human === -1 || human === end) return messages
+  return [
+    ...messages.slice(0, start),
+    ...messages.slice(start, human),
+    ...messages.slice(human + 1, end + 1),
+    messages[human]!,
+    ...messages.slice(end + 1),
+  ]
+}
+
+/**
+ * Whether one message is the human's own input rather than injected context.
+ *
+ * Injected context shares the `user` role but carries its own `source.kind`. A
+ * message without a source is a one-shot request input, so it counts too.
+ * @param message - one projected message.
+ * @returns whether the message came from the human.
+ */
+function isHumanInput(message: RequestMessage | undefined): boolean {
+  if (message === undefined || message.role !== 'user') return false
+  const source = (message as { source?: { kind?: unknown } }).source
+  return source === undefined || source.kind === 'user'
+}
+
+/**
  * Serialize the projected conversation in order.
  *
  * Tool results remain `role: 'tool'` messages, including their image parts.
- * Earlier user images forward into the last user message for compatibility
- * with services that only honor image content there.
+ * Images stay in the message that carried them: the turn's final user message
+ * is what the service routes and traces, so moving images onto it would report
+ * a request the human never sent.
  * @param messages - the projected conversation (no offloaded occurrences).
  * @param supportsImages - whether the selected model declared image input.
  * @param images - request versions for every image reference, keyed by id.
@@ -237,16 +287,9 @@ export function serializeMessages(
   supportsImages: boolean,
   images: ReadonlyMap<string, RequestImageAttachment> = new Map(),
 ): WireMessage[] {
-  // Find the last user message first so its own images stay in place.
-  let lastUserIndex = -1
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i]
-    if (message === undefined) continue
-    if (message.role === 'user') lastUserIndex = i
-  }
+  const ordered = humanInputLast(messages)
   const wire: WireMessage[] = []
-  const forwarded: WireContentPart[] = []
-  for (const [messageIndex, message] of messages.entries()) {
+  for (const message of ordered) {
     assertSupportedContent(message.content, supportsImages)
     if (message.role === 'system') {
       wire.push({ role: 'system', content: flattenText(message.content) })
@@ -278,31 +321,10 @@ export function serializeMessages(
     }
     const userParts = contentParts(message.content, images)
     const userText = flattenText(message.content)
-    const isLastUser = messageIndex === lastUserIndex
     if (userParts.length > 0) {
-      // Image parts leave every user turn but the final one.
-      const keptParts = isLastUser ? userParts : userParts.filter(part => part.type !== 'image_url')
-      forwarded.push(...(isLastUser ? [] : userParts.filter(part => part.type === 'image_url')))
-      if (keptParts.length > 0) {
-        wire.push({ role: 'user', content: userContent(keptParts) })
-      } else {
-        // The message carried only images; keep a placeholder user turn so
-        // later tool results still follow one on the wire.
-        wire.push({ role: 'user', content: userText })
-      }
+      wire.push({ role: 'user', content: userContent(userParts) })
     } else if (userText.length > 0) {
       wire.push({ role: 'user', content: userText })
-    }
-  }
-  if (forwarded.length > 0) {
-    const lastUser = [...wire].reverse().find(message => message.role === 'user')
-    if (lastUser !== undefined) {
-      const existing = lastUser.content
-      lastUser.content = Array.isArray(existing)
-        ? [...forwarded, ...existing]
-        : [...forwarded, { type: 'text', text: existing }]
-    } else {
-      wire.push({ role: 'user', content: forwarded })
     }
   }
   return wire
