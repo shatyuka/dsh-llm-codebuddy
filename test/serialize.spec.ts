@@ -214,14 +214,13 @@ describe('serializeMessages — images', () => {
       userMessage([{ type: 'text', text: 'later' }]),
     ], true, new Map([['early', requestImage('early', [1])]]))
 
-    // The closed turn keeps its position, so the image stays put and the open
-    // turn's reordering does not reach back across the assistant message.
+    // Each turn is ordered context first, human input last.
     expect(wire.map(message => message.role)).toEqual(['user', 'user', 'assistant', 'user'])
-    const parts = wire[0]?.content as { type: string, image_url?: { url: string } }[]
+    expect(wire[0]?.content).toBe('context')
+    // The image stays on the message that carried it.
+    const parts = wire[1]?.content as { type: string, image_url?: { url: string } }[]
     expect(parts.filter(part => part.type === 'image_url').map(part => part.image_url?.url))
       .toEqual(['data:image/png;base64,AQ=='])
-    // Within the open turn the context comes first and the human input last.
-    expect(wire[1]?.content).toBe('context')
     expect(wire[3]?.content).toBe('later')
   })
 
@@ -261,9 +260,9 @@ describe('serializeMessages — images', () => {
     expect(wire.map(message => message.role)).toEqual(['user', 'user', 'assistant', 'tool'])
   })
 
-  it('leaves closed turns in the order they were already sent', () => {
-    // Reordering history would change the prompt prefix on every request and
-    // drop the provider's prompt cache. Only the open turn is rearranged.
+  it('lays out closed turns the same way as the open one', () => {
+    // A turn must look identical whether it is the open turn or history, so the
+    // result depends only on the messages and each turn's prefix stays stable.
     const wire = serializeMessages([
       userMessage([{ type: 'text', text: 'first ask' }]),
       contextMessage('first context'),
@@ -273,8 +272,8 @@ describe('serializeMessages — images', () => {
     ], false)
 
     expect(wire.map(message => message.content)).toEqual([
-      'first ask',
       'first context',
+      'first ask',
       'done',
       'second context',
       'second ask',

@@ -222,38 +222,45 @@ function userContent(parts: readonly WireContentPart[]): string | WireContentPar
 }
 
 /**
- * Move the human's input to the end of the open turn's user messages.
+ * Move the human's input to the end of each turn's user messages.
  *
  * CodeBuddy reads a turn's final user message as the human input. A turn emits
  * that message followed by injected context, so without this the service sees
  * the clock reading as the ask.
  *
- * Only the open turn moves: reordering closed turns would change the prompt
- * prefix every request and drop the provider's cache.
+ * Every turn is reordered, closed ones included, so a turn is laid out the same
+ * way whether it is the open one or a later turn's history. The result depends
+ * only on the messages, so each turn's prefix stays byte-identical across
+ * requests and the provider's cache still hits.
  * @param messages - the projected conversation in session order.
- * @returns the reordered conversation.
+ * @returns the reordered conversation, or the same array when nothing moves.
  */
 function humanInputLast(messages: readonly RequestMessage[]): readonly RequestMessage[] {
-  // The open turn is the last run of adjacent user messages, wherever the
-  // request ends: a step that called a tool leaves assistant and tool messages
-  // after it, and the human input must still lead them.
-  let end = messages.length - 1
-  while (end >= 0 && messages[end]?.role !== 'user') end--
-  if (end < 0) return messages
-  let start = end
-  while (start > 0 && messages[start - 1]?.role === 'user') start--
-  let human = -1
-  for (let i = start; i <= end; i++) {
-    if (isHumanInput(messages[i])) human = i
+  const output: RequestMessage[] = []
+  let moved = false
+  let start = 0
+  while (start < messages.length) {
+    if (messages[start]?.role !== 'user') {
+      output.push(messages[start]!)
+      start++
+      continue
+    }
+    let end = start
+    while (end + 1 < messages.length && messages[end + 1]?.role === 'user') end++
+    let human = -1
+    for (let i = start; i <= end; i++) {
+      if (isHumanInput(messages[i])) human = i
+    }
+    for (let i = start; i <= end; i++) {
+      if (i !== human) output.push(messages[i]!)
+    }
+    if (human !== -1) {
+      output.push(messages[human]!)
+      if (human !== end) moved = true
+    }
+    start = end + 1
   }
-  if (human === -1 || human === end) return messages
-  return [
-    ...messages.slice(0, start),
-    ...messages.slice(start, human),
-    ...messages.slice(human + 1, end + 1),
-    messages[human]!,
-    ...messages.slice(end + 1),
-  ]
+  return moved ? output : messages
 }
 
 /**
