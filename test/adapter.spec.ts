@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { CodeBuddyAdapter, httpErrorCode } from '../src/adapter.js'
+import { breakChannelFingerprint, CodeBuddyAdapter, httpErrorCode, isCodeBuddyEndpoint } from '../src/adapter.js'
 import type { CodeBuddyConnectionOptions } from '../src/adapter.js'
 import { NotLoggedInError, SessionUnavailableError } from '../src/session.js'
 import type { CodeBuddyModel } from '../src/types.js'
@@ -409,6 +409,64 @@ describe('stream — request construction', () => {
         source: { kind: 'user' },
       })],
     })).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+  })
+})
+
+describe('stream — channel-verification fingerprint', () => {
+  /** The identity the service refuses, as the harness assembles it. */
+  const IDENTITY = 'You are an AI agent powered by DeepSeek Harness.'
+  const systemOf = (call: unknown): string => {
+    const init = (call as [string, RequestInit])[1]
+    const body = JSON.parse(String(init.body)) as { messages: { role: string, content: string }[] }
+    return body.messages.find(message => message.role === 'system')?.content ?? ''
+  }
+
+  it('splits the refused opener with a colon before the request leaves', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    await drain(adapterOf(sessionOf()), {
+      provider: 'codebuddy', model: 'm', messages: [], system: `${IDENTITY}\n\nBody.`,
+    })
+    expect(systemOf(fetchMock.mock.calls[0])).toBe('You are an AI agent powered by: DeepSeek Harness.\n\nBody.')
+  })
+
+  it('leaves the phrase alone when it is not the opening', async () => {
+    // The service ignores the phrase elsewhere, so rewriting it would only
+    // change text the model is meant to see.
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const system = `Intro.\n\n${IDENTITY}\n\nBody.`
+    await drain(adapterOf(sessionOf()), { provider: 'codebuddy', model: 'm', messages: [], system })
+    expect(systemOf(fetchMock.mock.calls[0])).toBe(system)
+  })
+
+  it('leaves a custom gateway alone', async () => {
+    // A proxy has no channel check, and its operator should see the prompt
+    // the harness actually assembled.
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const adapter = adapterOf(sessionOf(), { ...DEFAULT_CONNECTION, baseURL: 'https://proxy.example/v2' })
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [], system: IDENTITY })
+    expect(systemOf(fetchMock.mock.calls[0])).toBe(IDENTITY)
+  })
+
+  it('recognizes both CodeBuddy sites and nothing else', () => {
+    for (const host of ['https://copilot.tencent.com/v2', 'https://www.codebuddy.ai/v2', 'https://www.codebuddy.ai']) {
+      expect(isCodeBuddyEndpoint(host), host).toBe(true)
+    }
+    for (const host of ['https://proxy.example/v2', 'https://copilot.tencent.com.evil.test/v2', 'https://www.codebuddy.ai.example/v2']) {
+      expect(isCodeBuddyEndpoint(host), host).toBe(false)
+    }
+  })
+
+  it('adds the colon once, whatever the prompt repeats', () => {
+    expect(breakChannelFingerprint(IDENTITY)).toBe('You are an AI agent powered by: DeepSeek Harness.')
+    // Already defused: a second pass changes nothing.
+    expect(breakChannelFingerprint('You are an AI agent powered by: DeepSeek Harness.'))
+      .toBe('You are an AI agent powered by: DeepSeek Harness.')
+    // A different opener is not the fingerprint.
+    expect(breakChannelFingerprint('You are an AI agent running on DeepSeek Harness.'))
+      .toBe('You are an AI agent running on DeepSeek Harness.')
   })
 })
 

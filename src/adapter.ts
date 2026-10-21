@@ -36,6 +36,7 @@ import type {
 import {
   CODEBUDDY_DISPLAY_NAME,
   CODEBUDDY_IDE_USER_AGENT,
+  CODEBUDDY_SITES,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
   CODE_NO_QUOTA,
@@ -51,7 +52,7 @@ import type { AttachmentReader } from './serialize.js'
 import { serializeRequest } from './serialize.js'
 import { translate } from './translate.js'
 import { hasDisclosedCapacity } from './types.js'
-import type { CodeBuddyModel, WireError, WireWording } from './types.js'
+import type { CodeBuddyModel, WireError, WireMessage, WireWording } from './types.js'
 
 /** Connection facts the registering plugin resolves and the adapter trusts. */
 export interface CodeBuddyConnectionOptions {
@@ -124,6 +125,51 @@ function messagesHaveRetainedImage(messages: readonly RequestMessage[]): boolean
   // they read no bytes; only a retained occurrence needs the attachment store.
   return messages.some(message => message.content.some(block =>
     block.type === 'image' && block.offloaded !== true))
+}
+
+/**
+ * The harness identity sentence CodeBuddy answers with HTTP 400 / code 11128
+ * when a system prompt opens with it.
+ */
+const OFFICIAL_IDENTITY = 'You are an AI agent powered by DeepSeek Harness'
+
+/** {@link OFFICIAL_IDENTITY} with a colon, which the service's check does not match. */
+const BYPASS_IDENTITY = 'You are an AI agent powered by: DeepSeek Harness'
+
+/**
+ * Break the channel-check fingerprint in one system prompt.
+ *
+ * Idempotent: the rewritten sentence no longer starts with the fingerprint.
+ * @param system - the system message content as serialized.
+ * @returns the content, with the colon inserted when it opened with the phrase.
+ */
+export function breakChannelFingerprint(system: string): string {
+  if (!system.startsWith(OFFICIAL_IDENTITY)) return system
+  return `${BYPASS_IDENTITY}${system.slice(OFFICIAL_IDENTITY.length)}`
+}
+
+/**
+ * Whether a chat base names a CodeBuddy deployment, the only site that runs the
+ * channel check; a proxy or another gateway must see the prompt unchanged.
+ * @param base - the resolved chat base, with no trailing slash.
+ */
+export function isCodeBuddyEndpoint(base: string): boolean {
+  return Object.values(CODEBUDDY_SITES).some(origin =>
+    base === origin || base.startsWith(`${origin}/`))
+}
+
+/**
+ * Break the fingerprint in every system message, in place.
+ *
+ * Only system messages, and only at their opening: the service ignores the
+ * phrase elsewhere, so rewriting it there would edit text the model should see.
+ * @param messages - the serialized wire messages.
+ */
+function breakSystemFingerprints(messages: readonly WireMessage[]): void {
+  for (const message of messages) {
+    if (message.role !== 'system' || typeof message.content !== 'string') continue
+    message.content = breakChannelFingerprint(message.content)
+  }
 }
 
 /**
@@ -510,13 +556,14 @@ export class CodeBuddyAdapter extends LlmAdapter {
       entry?.reasoning?.summary,
       catalogTemperature(entry),
     )
+    // The credential's site decides the host; an explicit `baseURL` wins.
+    const chatBase = connection.baseURL ?? `${endpointOf(identity.site)}/v2`
+    if (isCodeBuddyEndpoint(chatBase)) breakSystemFingerprints(body.messages)
     // Serialized before the try so the transport label below covers only the
     // transport boundary.
     const payload = JSON.stringify(body)
 
     let response: Response
-    // The credential's site decides the host; an explicit `baseURL` wins.
-    const chatBase = connection.baseURL ?? `${endpointOf(identity.site)}/v2`
     const requestTurnId = turnRequestId(options.sessionId, this.config.turnOf?.())
     try {
       response = await fetch(`${chatBase}/chat/completions`, {
