@@ -315,11 +315,20 @@ export interface ConfigResponse extends ResponseBase {
   data?: CodeBuddyConfig
 }
 
+/** One curated sentence per language the service discloses, keyed by locale id. */
+export interface WireWording {
+  zh?: string
+  en?: string
+  'zh-hant'?: string
+  [language: string]: string | undefined
+}
+
 /**
  * The envelope a non-2xx chat reply carries: the service's control-plane shape,
  * or the OpenAI `{error: {...}}` a custom `baseURL` may speak. The wording is
  * spread across `msg`, `extError`, and `displayMsg`, since a condition can be
- * recognizable from only one of them.
+ * recognizable from only one of them; `displayTips` carries advice rather than
+ * a condition, so it is displayed but never classified.
  */
 export interface WireError {
   /** Service error code, e.g. 11115. */
@@ -333,13 +342,14 @@ export interface WireError {
     message?: string
     param?: string
   }
-  /** Curated user-facing sentences, keyed by language. */
-  displayMsg?: {
-    zh?: string
-    en?: string
-    'zh-hant'?: string
-    [language: string]: string | undefined
-  }
+  /** Curated user-facing sentences naming what went wrong, keyed by language. */
+  displayMsg?: WireWording
+  /**
+   * Curated advice on what to do about it, in the same languages as
+   * `displayMsg` and shown after it. Kept out of the classifiers' text: remedy
+   * wording would refile a failure under a condition the reply never claimed.
+   */
+  displayTips?: WireWording
   /** OpenAI-compatible envelope. */
   error?: {
     message?: string

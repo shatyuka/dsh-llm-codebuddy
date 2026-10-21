@@ -457,21 +457,23 @@ describe('stream — HTTP failures', () => {
     expect(delay).toBeLessThanOrEqual(30_000)
   })
 
+  /** An adapter failing with one envelope, in one language. */
+  function failingWith(body: object, language: () => string | undefined, status = 400): CodeBuddyAdapter {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status })))
+    return new CodeBuddyAdapter({
+      session: sessionOf() as never,
+      options: () => DEFAULT_CONNECTION,
+      language,
+    })
+  }
+
   it('reports the service wording in the language the client is displaying', async () => {
     const body = { code: 1, msg: 'raw', displayMsg: { en: 'English wording', zh: '中文说明', 'zh-hant': '繁體說明' } }
-    const failing = (language: () => string | undefined) => {
-      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 400 })))
-      return new CodeBuddyAdapter({
-        session: sessionOf() as never,
-        options: () => DEFAULT_CONNECTION,
-        language,
-      })
-    }
-    await expect(drain(failing(() => 'zh'), { provider: 'codebuddy', model: 'm', messages: [] }))
+    await expect(drain(failingWith(body, () => 'zh'), { provider: 'codebuddy', model: 'm', messages: [] }))
       .rejects.toMatchObject({ message: '中文说明' })
-    await expect(drain(failing(() => 'zh-TW'), { provider: 'codebuddy', model: 'm', messages: [] }))
+    await expect(drain(failingWith(body, () => 'zh-TW'), { provider: 'codebuddy', model: 'm', messages: [] }))
       .rejects.toMatchObject({ message: '繁體說明' })
-    await expect(drain(failing(() => 'en-US'), { provider: 'codebuddy', model: 'm', messages: [] }))
+    await expect(drain(failingWith(body, () => 'en-US'), { provider: 'codebuddy', model: 'm', messages: [] }))
       .rejects.toMatchObject({ message: 'English wording' })
   })
 
@@ -497,6 +499,106 @@ describe('stream — HTTP failures', () => {
     )))
     await expect(drain(adapterOf(sessionOf()), { provider: 'codebuddy', model: 'm', messages: [] }))
       .rejects.toMatchObject({ message: 'raw service wording' })
+  })
+
+  /** A reply carrying both curated halves, in every language the service ships. */
+  const CURATED = {
+    displayMsg: { en: 'msg-en', zh: '测试信息', 'zh-hant': '測試訊息' },
+    displayTips: { en: 'tips-en', zh: '测试提示', 'zh-hant': '測試提示' },
+  }
+
+  it('reports the advice after the statement', async () => {
+    await expect(drain(failingWith(CURATED, () => 'zh-CN'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: '测试信息：测试提示' })
+  })
+
+  it('reports the Traditional wording for a Traditional client', async () => {
+    await expect(drain(failingWith(CURATED, () => 'zh-TW'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: '測試訊息：測試提示' })
+  })
+
+  it('reports the English wording for an English client', async () => {
+    await expect(drain(failingWith(CURATED, () => 'en-US'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: 'msg-en: tips-en' })
+  })
+
+  /** One reply whose statement ends with `ending`. */
+  const endingWith = (statement: string) => ({ code: 1, displayMsg: { en: statement }, displayTips: { en: 'tips' } })
+
+  it('adds a full-width colon after an unpunctuated Chinese statement', async () => {
+    await expect(drain(failingWith({ code: 1, displayMsg: { zh: '测试' }, displayTips: { zh: '提示' } }, () => 'zh'),
+      { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: '测试：提示' })
+  })
+
+  it('adds nothing after a Chinese statement that ends a sentence', async () => {
+    for (const statement of ['测试。', '测试！', '测试？', '测试…']) {
+      await expect(drain(failingWith({ code: 1, displayMsg: { zh: statement }, displayTips: { zh: '提示' } }, () => 'zh'),
+        { provider: 'codebuddy', model: 'm', messages: [] }))
+        .rejects.toMatchObject({ message: `${statement}提示` })
+    }
+  })
+
+  it('adds nothing after a Chinese statement that ends a clause', async () => {
+    const body = { code: 1, displayMsg: { zh: '测试：' }, displayTips: { zh: '提示' } }
+    await expect(drain(failingWith(body, () => 'zh'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: '测试：提示' })
+  })
+
+  it('adds a colon and a space after an unpunctuated Latin statement', async () => {
+    await expect(drain(failingWith(endingWith('msg'), () => 'en-US'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: 'msg: tips' })
+  })
+
+  it('adds one space after a Latin statement that ends a sentence', async () => {
+    for (const statement of ['msg.', 'msg!', 'msg?', 'msg…']) {
+      await expect(drain(failingWith(endingWith(statement), () => 'en-US'), { provider: 'codebuddy', model: 'm', messages: [] }))
+        .rejects.toMatchObject({ message: `${statement} tips` })
+    }
+  })
+
+  it('adds one space after a Latin statement that ends a clause', async () => {
+    await expect(drain(failingWith(endingWith('msg:'), () => 'en-US'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: 'msg: tips' })
+  })
+
+  it('follows the statement text, not the client language, for the separator', async () => {
+    // An English statement on a Chinese client still reads as Latin: the
+    // separator has to match the text being displayed.
+    await expect(drain(failingWith(endingWith('msg'), () => 'zh-CN'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: 'msg: tips' })
+  })
+
+  it('reports the advice alone when the reply carries no statement', async () => {
+    const body = { code: 1, displayTips: { zh: '测试提示' } }
+    await expect(drain(failingWith(body, () => 'zh'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST', message: '测试提示' })
+  })
+
+  it('does not repeat advice that matches the statement', async () => {
+    const body = { code: 1, displayMsg: { en: 'same' }, displayTips: { en: 'same' } }
+    await expect(drain(failingWith(body, () => 'en-US'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ message: 'same' })
+  })
+
+  it('does not let the advice steer the failure code', async () => {
+    // Only the statement classifies, even when the advice holds the wording a
+    // classifier would match.
+    const body = {
+      code: 1,
+      displayMsg: { en: 'msg' },
+      displayTips: { en: 'quota exceeded' },
+    }
+    await expect(drain(failingWith(body, () => 'en-US'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  })
+
+  it('shows advice-only wording under the status-derived code', async () => {
+    // The cost of keeping advice out of classification, asserted so the
+    // tradeoff stays visible.
+    const body = { code: 1, displayTips: { en: 'insufficient balance' } }
+    await expect(drain(failingWith(body, () => 'en-US'), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ code: 'INVALID_REQUEST', message: 'insufficient balance' })
   })
 
   it('keeps the status when the error body cannot be parsed', async () => {

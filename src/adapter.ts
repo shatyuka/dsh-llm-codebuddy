@@ -51,7 +51,7 @@ import type { AttachmentReader } from './serialize.js'
 import { serializeRequest } from './serialize.js'
 import { translate } from './translate.js'
 import { hasDisclosedCapacity } from './types.js'
-import type { CodeBuddyModel, WireError } from './types.js'
+import type { CodeBuddyModel, WireError, WireWording } from './types.js'
 
 /** Connection facts the registering plugin resolves and the adapter trusts. */
 export interface CodeBuddyConnectionOptions {
@@ -156,6 +156,54 @@ interface WireFailure {
 }
 
 /**
+ * The sentence one curated field carries in the reporting language: the reported
+ * tag first, then English, then `zh`, or nothing when the field is absent.
+ * @param field - one `displayMsg`/`displayTips` block, when the reply carried it.
+ * @param language - the language to report the service's wording in.
+ */
+function curatedSentence(field: WireWording | undefined, language: string | undefined): string | undefined {
+  if (field === undefined) return undefined
+  return firstText([
+    ...wordingKeys(language).map(key => field[key]),
+    field.en,
+    field.zh,
+  ])
+}
+
+/** Whether the text contains Han characters, which is what decides the separator. */
+const HAS_CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/u
+
+/** Endings that already close a Chinese sentence or clause, so nothing is added. */
+const CJK_END = /[。！？…：；，]$/u
+
+/** Endings that already close a Latin sentence or clause, so only a space is added. */
+const LATIN_END = /[.!?…:;,]$/u
+
+/**
+ * Join a failure's statement to the advice about it.
+ *
+ * The separator follows the statement's own text, not the locale: a reply can
+ * carry a Chinese statement and an English tip when one side lacks the reported
+ * language. Chinese needs no space and takes a full-width colon; Latin often
+ * needs the space to stay readable. A statement that already ends a sentence or
+ * a clause keeps its own punctuation instead of gaining a second mark.
+ *
+ * One string, not two fields, because the harness flattens a provider failure
+ * to a closed set of facts and would drop a separate `tips`.
+ * @param statement - what went wrong, in the reporting language.
+ * @param tips - what to do about it, when the reply carried advice.
+ * @returns one reportable sentence, or the statement alone.
+ */
+function joinedMessage(statement: string, tips: string | undefined): string {
+  // A doubled sentence reads as a stutter, not as emphasis.
+  if (tips === undefined || tips === statement) return statement
+  if (HAS_CJK.test(statement)) {
+    return CJK_END.test(statement) ? `${statement}${tips}` : `${statement}：${tips}`
+  }
+  return LATIN_END.test(statement) ? `${statement} ${tips}` : `${statement}: ${tips}`
+}
+
+/**
  * Read one failure envelope, or nothing when the body is unreadable — the status
  * still identifies that failure.
  * @param body - the parsed error body.
@@ -166,14 +214,9 @@ function readWireFailure(body: WireError, language: string | undefined): WireFai
   const display = body.displayMsg
   const compatible = body.error
   const code = failureCode(body)
-  // The reported locale id names the key directly; English stands as the
-  // service's own default.
-  const curated = firstText([
-    ...wordingKeys(language).map(key => display?.[key]),
-    display?.en,
-    display?.zh,
-  ])
-  const message = curated ?? firstText([
+  // `displayMsg` states the condition, `displayTips` the remedy; either may be
+  // missing, and the advice follows the statement rather than replacing it.
+  const statement = curatedSentence(display, language) ?? firstText([
     body.msg,
     provider?.message,
     compatible?.message,
@@ -182,6 +225,11 @@ function readWireFailure(body: WireError, language: string | undefined): WireFai
     // `{error:{message}}` has no `data` and must keep using the flat field.
     compatible?.data?.msg,
   ])
+  const tips = curatedSentence(body.displayTips, language)
+  const message = statement === undefined ? tips : joinedMessage(statement, tips)
+  // `displayTips` stays out of the classifier text: remedy wording ("top up
+  // your quota") would refile a failure under a condition the reply never
+  // claimed, so such a reply shows the advice under a status-derived code.
   const detail = [
     body.code === undefined ? undefined : String(body.code),
     body.msg,
