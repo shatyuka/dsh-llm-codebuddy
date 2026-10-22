@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { breakChannelFingerprint, CodeBuddyAdapter, httpErrorCode, isCodeBuddyEndpoint } from '../src/adapter.js'
+import { CodeBuddyAdapter, httpErrorCode } from '../src/adapter.js'
 import type { CodeBuddyConnectionOptions } from '../src/adapter.js'
 import { NotLoggedInError, SessionUnavailableError } from '../src/session.js'
 import type { CodeBuddyModel } from '../src/types.js'
@@ -412,7 +412,7 @@ describe('stream — request construction', () => {
   })
 })
 
-describe('stream — channel-verification fingerprint', () => {
+describe('stream — prompt wording', () => {
   /** The identity the service refuses, as the harness assembles it. */
   const IDENTITY = 'You are an AI agent powered by DeepSeek Harness.'
   const systemOf = (call: unknown): string => {
@@ -421,7 +421,7 @@ describe('stream — channel-verification fingerprint', () => {
     return body.messages.find(message => message.role === 'system')?.content ?? ''
   }
 
-  it('splits the refused opener with a colon before the request leaves', async () => {
+  it('adjusts the opening sentence before the request leaves', async () => {
     const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }]))
     vi.stubGlobal('fetch', fetchMock)
     await drain(adapterOf(sessionOf()), {
@@ -431,8 +431,7 @@ describe('stream — channel-verification fingerprint', () => {
   })
 
   it('leaves the phrase alone when it is not the opening', async () => {
-    // The service ignores the phrase elsewhere, so rewriting it would only
-    // change text the model is meant to see.
+    // Only an opening is worded this way, so an inner occurrence must survive.
     const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }]))
     vi.stubGlobal('fetch', fetchMock)
     const system = `Intro.\n\n${IDENTITY}\n\nBody.`
@@ -440,33 +439,69 @@ describe('stream — channel-verification fingerprint', () => {
     expect(systemOf(fetchMock.mock.calls[0])).toBe(system)
   })
 
-  it('leaves a custom gateway alone', async () => {
-    // A proxy has no channel check, and its operator should see the prompt
-    // the harness actually assembled.
+  it('adjusts a configured base too, since it still reaches this deployment', async () => {
+    // The route decides, not the host: a proxy in front of the same deployment
+    // needs the same wording.
     const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }]))
     vi.stubGlobal('fetch', fetchMock)
     const adapter = adapterOf(sessionOf(), { ...DEFAULT_CONNECTION, baseURL: 'https://proxy.example/v2' })
     await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [], system: IDENTITY })
-    expect(systemOf(fetchMock.mock.calls[0])).toBe(IDENTITY)
+    expect(systemOf(fetchMock.mock.calls[0])).toBe('You are an AI agent powered by: DeepSeek Harness.')
   })
 
-  it('recognizes both CodeBuddy sites and nothing else', () => {
-    for (const host of ['https://copilot.tencent.com/v2', 'https://www.codebuddy.ai/v2', 'https://www.codebuddy.ai']) {
-      expect(isCodeBuddyEndpoint(host), host).toBe(true)
-    }
-    for (const host of ['https://proxy.example/v2', 'https://copilot.tencent.com.evil.test/v2', 'https://www.codebuddy.ai.example/v2']) {
-      expect(isCodeBuddyEndpoint(host), host).toBe(false)
-    }
+  it('never edits what the user typed', async () => {
+    // Routing input through this rewrite would make the wire disagree with the
+    // user's own words.
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    await drain(adapterOf(sessionOf()), {
+      provider: 'codebuddy', model: 'm', messages: [createUserMessage({ content: [{ type: 'text', text: IDENTITY }], source: { kind: 'user' } })],
+    })
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1]
+    const body = JSON.parse(String(init.body)) as { messages: { role: string, content: string }[] }
+    expect(body.messages.find(message => message.role === 'user')?.content).toBe(IDENTITY)
   })
 
-  it('adds the colon once, whatever the prompt repeats', () => {
-    expect(breakChannelFingerprint(IDENTITY)).toBe('You are an AI agent powered by: DeepSeek Harness.')
-    // Already defused: a second pass changes nothing.
-    expect(breakChannelFingerprint('You are an AI agent powered by: DeepSeek Harness.'))
-      .toBe('You are an AI agent powered by: DeepSeek Harness.')
-    // A different opener is not the fingerprint.
-    expect(breakChannelFingerprint('You are an AI agent running on DeepSeek Harness.'))
-      .toBe('You are an AI agent running on DeepSeek Harness.')
+  it('never edits what a tool returned', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const toolResult = 'without naming another target, they mean this GUI.'
+    await drain(adapterOf(sessionOf()), {
+      provider: 'codebuddy',
+      model: 'm',
+      messages: [
+        createUserMessage({ content: [{ type: 'text', text: 'run it' }], source: { kind: 'user' } }),
+        {
+          role: 'tool',
+          toolCallId: 'call-1',
+          content: [{ type: 'text', text: toolResult }],
+        } as never,
+      ],
+    })
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1]
+    const body = JSON.parse(String(init.body)) as { messages: { role: string, content: string }[] }
+    expect(body.messages.find(message => message.role === 'tool')?.content).toBe(toolResult)
+  })
+
+  it('adjusts the labels of a runtime-context snapshot', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const snapshot = 'Current runtime context. This snapshot supersedes earlier ones.\n\n'
+      + 'Current DeepSeek Harness Web GUI URL: "http://127.0.0.1:1".'
+    // `runtime-context` is declared by the loop package, which this plugin does
+    // not depend on: asserted here, not imported.
+    const message = createUserMessage({
+      content: [{ type: 'text', text: snapshot }],
+      source: { kind: 'runtime-context' } as never,
+    })
+    await drain(adapterOf(sessionOf()), {
+      provider: 'codebuddy', model: 'm', messages: [message],
+    })
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1]
+    const body = JSON.parse(String(init.body)) as { messages: { role: string, content: string }[] }
+    const sent = body.messages.find(message => message.role === 'user')?.content ?? ''
+    expect(sent).toContain('The DeepSeek Harness Web GUI URL in effect:')
+    expect(sent).toContain('Current runtime context. This snapshot supersedes earlier ones.')
   })
 })
 
