@@ -54,6 +54,7 @@ import { serializeRequest } from './serialize.js'
 import { translate } from './translate.js'
 import { hasDisclosedCapacity } from './types.js'
 import type { CodeBuddyModel, WireError, WireWording } from './types.js'
+import { uuidv7 } from './uuid.js'
 
 /** Connection facts the registering plugin resolves and the adapter trusts. */
 export interface CodeBuddyConnectionOptions {
@@ -523,6 +524,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
 
     let response: Response
     const requestTurnId = turnRequestId(options.sessionId, this.config.turnOf?.())
+    const requestMessageId = uuidv7()
     try {
       response = await fetch(`${chatBase}/chat/completions`, {
         method: 'POST',
@@ -534,6 +536,8 @@ export class CodeBuddyAdapter extends LlmAdapter {
           'X-Model-ID': options.model,
           ...options.sessionId === undefined ? {} : { 'X-Conversation-ID': options.sessionId },
           ...requestTurnId === undefined ? {} : { 'X-Conversation-Request-ID': requestTurnId },
+          'X-Conversation-Message-ID': requestMessageId,
+          'X-Request-ID': requestMessageId,
         },
         body: payload,
         ...options.signal === undefined ? {} : { signal: options.signal },

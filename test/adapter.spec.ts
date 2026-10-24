@@ -361,6 +361,29 @@ describe('stream — request construction', () => {
 
     const headers = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>
     expect(headers['X-Conversation-Request-ID']).toBeUndefined()
+    // The message id is per request, not per turn, so it survives a cold lookup.
+    expect(headers['X-Conversation-Message-ID']).toMatch(/^[0-9a-f]{32}$/)
+    expect(headers['X-Request-ID']).toBe(headers['X-Conversation-Message-ID'])
+  })
+
+  it('gives every request its own message id within a turn', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+    const adapter = adapterOf(sessionOf(), DEFAULT_CONNECTION, () => 5)
+
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
+
+    const first = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>
+    const second = (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].headers as Record<string, string>
+    expect(first['X-Conversation-Message-ID']).toMatch(/^[0-9a-f]{32}$/)
+    expect(second['X-Conversation-Message-ID']).not.toBe(first['X-Conversation-Message-ID'])
+    // Same turn, so the request id stays put while the message id moves.
+    expect(second['X-Conversation-Request-ID']).toBe(first['X-Conversation-Request-ID'])
+    // The trace id travels with the message id.
+    expect(first['X-Request-ID']).toBe(first['X-Conversation-Message-ID'])
+    expect(second['X-Request-ID']).toBe(second['X-Conversation-Message-ID'])
   })
 
   it('uses the international host for an international credential', async () => {
