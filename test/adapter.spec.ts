@@ -60,6 +60,16 @@ async function drain(adapter: CodeBuddyAdapter, options: Record<string, unknown>
   return chunks
 }
 
+/** One recorded request's headers, by call index. */
+function headersOf(fetchMock: ReturnType<typeof vi.fn>, call: number): Record<string, string> {
+  return (fetchMock.mock.calls[call] as unknown as [string, RequestInit])[1].headers as Record<string, string>
+}
+
+/** One recorded request's turn id, by call index. */
+function requestIdOf(fetchMock: ReturnType<typeof vi.fn>, call: number): string | undefined {
+  return headersOf(fetchMock, call)['X-Conversation-Request-ID']
+}
+
 afterEach(() => {
   vi.unstubAllGlobals()
 })
@@ -343,14 +353,15 @@ describe('stream — request construction', () => {
     })
 
     await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
-    expect(((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>)['X-Conversation-Request-ID']).toBeUndefined()
+    // No turn yet, so the header names the request.
+    expect(requestIdOf(fetchMock, 0)).toMatch(/^[0-9a-f]{32}$/)
 
     reader = () => 3
     await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
-    expect(((fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].headers as Record<string, string>)['X-Conversation-Request-ID']).toMatch(/^[0-9a-f]{32}$/)
+    expect(requestIdOf(fetchMock, 1)).toMatch(/^[0-9a-f]{32}$/)
   })
 
-  it('omits the request id when the host cannot name the turn', async () => {
+  it('names the request itself when the host cannot name the turn', async () => {
     const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
     vi.stubGlobal('fetch', fetchMock)
     const user = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
@@ -358,12 +369,34 @@ describe('stream — request construction', () => {
     const adapter = adapterOf(sessionOf(), DEFAULT_CONNECTION, () => undefined)
 
     await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], sessionId: 'sess-1' })
 
     const headers = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>
-    expect(headers['X-Conversation-Request-ID']).toBeUndefined()
+    expect(headers['X-Conversation-ID']).toBe('sess-1')
+    // An unnamed turn must not fuse two requests into one.
+    expect(headers['X-Conversation-Request-ID']).toMatch(/^[0-9a-f]{32}$/)
+    expect(requestIdOf(fetchMock, 1)).not.toBe(requestIdOf(fetchMock, 0))
     // The message id is per request, not per turn, so it survives a cold lookup.
     expect(headers['X-Conversation-Message-ID']).toMatch(/^[0-9a-f]{32}$/)
     expect(headers['X-Request-ID']).toBe(headers['X-Conversation-Message-ID'])
+  })
+
+  it('names a session-less one-shot call so the channel check accepts it', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+    // Auto-review and compaction pass no session, hence no turn either.
+    const adapter = adapterOf(sessionOf())
+
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], purpose: 'compaction' })
+    await drain(adapter, { provider: 'codebuddy', model: 'm', messages: [user], purpose: 'compaction' })
+
+    const first = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>
+    const second = (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].headers as Record<string, string>
+    // Two one-shots never share a conversation.
+    expect(first['X-Conversation-ID']).toMatch(/^[0-9a-f]{32}$/)
+    expect(second['X-Conversation-ID']).not.toBe(first['X-Conversation-ID'])
+    expect(first['X-Conversation-Request-ID']).toMatch(/^[0-9a-f]{32}$/)
   })
 
   it('gives every request its own message id within a turn', async () => {

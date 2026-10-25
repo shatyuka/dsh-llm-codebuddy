@@ -108,16 +108,26 @@ function requestId(headers: Headers): ReturnType<typeof ProviderRequestId> | und
 export type CodeBuddyTurnReader = (sessionId: string) => number | undefined
 
 /**
+ * The `x-conversation-id` value. The service rejects a request without it, so a
+ * session-less one-shot call names itself.
+ * @param sessionId - the request's session, when it has one.
+ * @returns the session id, or a fresh one for a session-less call.
+ */
+function conversationId(sessionId: string | undefined): string {
+  return sessionId ?? uuidv7()
+}
+
+/**
  * The `x-conversation-request-id` value: one identity per turn, shared by that
- * turn's requests. Unreadable turn means no header — a guessed id would split
- * or merge turns in the service's grouping.
+ * turn's requests. Unreadable turn means a per-request id, since the service
+ * rejects a request without the header.
  * @param sessionId - the request's session, when it has one.
  * @param turnOf - the host turn reader, when one is configured.
- * @returns the request id, or `undefined` when no turn is readable.
+ * @returns the request id; a fresh one when no turn is readable.
  */
-function turnRequestId(sessionId: string | undefined, turnOf: CodeBuddyTurnReader | undefined): string | undefined {
+function turnRequestId(sessionId: string | undefined, turnOf: CodeBuddyTurnReader | undefined): string {
   const turn = sessionId === undefined || turnOf === undefined ? undefined : turnOf(sessionId)
-  if (turn === undefined) return undefined
+  if (turn === undefined) return uuidv7()
   return createHash('sha256').update(`${sessionId}#${turn}`).digest('hex').slice(0, 32)
 }
 
@@ -523,6 +533,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
     const payload = JSON.stringify(body)
 
     let response: Response
+    const requestConversationId = conversationId(options.sessionId)
     const requestTurnId = turnRequestId(options.sessionId, this.config.turnOf?.())
     const requestMessageId = uuidv7()
     try {
@@ -534,8 +545,8 @@ export class CodeBuddyAdapter extends LlmAdapter {
           'accept': 'text/event-stream',
           'user-agent': CODEBUDDY_IDE_USER_AGENT,
           'X-Model-ID': options.model,
-          ...options.sessionId === undefined ? {} : { 'X-Conversation-ID': options.sessionId },
-          ...requestTurnId === undefined ? {} : { 'X-Conversation-Request-ID': requestTurnId },
+          'X-Conversation-ID': requestConversationId,
+          'X-Conversation-Request-ID': requestTurnId,
           'X-Conversation-Message-ID': requestMessageId,
           'X-Request-ID': requestMessageId,
         },
