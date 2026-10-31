@@ -13,6 +13,10 @@ const IDENTITY_REPLACEMENT = 'You are an AI agent powered by: DeepSeek Harness'
 const WEB_SURFACE_TAIL = 'without naming another target, they mean this GUI.'
 const WEB_SURFACE_REPLACEMENT = 'without naming another target, they mean this Web GUI.'
 
+/** Path sentence, and its rewording. */
+const PATH_SIGNATURE = 'Relative paths resolve from the workspace root'
+const PATH_SIGNATURE_REPLACEMENT = 'Relative paths resolve against the workspace root'
+
 /** Runtime-context labels, and the rewording that says the same thing. */
 const RUNTIME_LABELS: readonly (readonly [string, string])[] = [
   [
@@ -33,6 +37,7 @@ export function adjustPromptText(text: string): string {
   return text
     .replace(IDENTITY, IDENTITY_REPLACEMENT)
     .replace(WEB_SURFACE_TAIL, WEB_SURFACE_REPLACEMENT)
+    .replace(PATH_SIGNATURE, PATH_SIGNATURE_REPLACEMENT)
 }
 
 /**

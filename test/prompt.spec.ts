@@ -40,6 +40,20 @@ describe('adjustPromptText', () => {
     expect(adjustPromptText(source)).toBe(source)
     expect(adjustPromptText(web)).toBe(web)
   })
+
+  it('rewords the path sentence the service blocks', () => {
+    const text = 'Tokens prefixed with @ are paths the user explicitly referenced. '
+      + 'Relative paths resolve from the workspace root; absolute paths identify files or directories on the host.'
+    expect(adjustPromptText(text)).toBe('Tokens prefixed with @ are paths the user explicitly referenced. '
+      + 'Relative paths resolve against the workspace root; absolute paths identify files or directories on the host.')
+  })
+
+  it('is idempotent across every rewrite', () => {
+    const text = `${IDENTITY}\n\nWhen asked "this page" without naming another target, they mean this GUI.\n\n`
+      + 'Relative paths resolve from the workspace root.'
+    const once = adjustPromptText(text)
+    expect(adjustPromptText(once)).toBe(once)
+  })
 })
 
 describe('adjustContextLabels', () => {
