@@ -8,6 +8,7 @@ import {
   CODEBUDDY_PROVIDER,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  DEFAULT_RETRY_AFTER_CEILING_MS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 } from '../src/constants.js'
 import type { CodeBuddyStorage } from '../src/storage.js'
@@ -105,6 +106,22 @@ describe('resolveConnectionOptions', () => {
     // bound must name the mode too; this asserts the value reaches it intact.
     const options = resolveConnectionOptions({ retryPolicy: { mode: 'normal', maxRetries: 2 } })
     expect(options.retryPolicy).toMatchObject({ mode: 'normal', maxRetries: 2 })
+  })
+
+  it('waits out the provider saturation cooldown by default', () => {
+    expect(resolveConnectionOptions({}).retryPolicy).toMatchObject({
+      mode: 'normal',
+      maxRetries: 5,
+      initialDelayMs: 500,
+      maxDelayMs: DEFAULT_RETRY_AFTER_CEILING_MS,
+    })
+  })
+
+  it('leaves a configured backoff ceiling alone', () => {
+    const options = resolveConnectionOptions({
+      retryPolicy: { mode: 'normal', backoff: { maxDelayMs: 5_000 } },
+    })
+    expect(options.retryPolicy).toMatchObject({ maxDelayMs: 5_000, maxRetries: 5 })
   })
 
   it('names the field when a policy is refused', () => {

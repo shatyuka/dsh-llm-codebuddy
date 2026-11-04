@@ -100,6 +100,9 @@ export const DEFAULT_MAX_TOKENS = 8_192
 /** Default maximum provider idle time while one stream read is outstanding. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 
+/** Longest `Retry-After` the default policy waits out. */
+export const DEFAULT_RETRY_AFTER_CEILING_MS = 30_000
+
 /** How long the browser login flow waits for the user to finish, in ms. */
 export const LOGIN_TIMEOUT_MS = 10 * 60 * 1000
 

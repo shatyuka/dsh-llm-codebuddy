@@ -19,6 +19,7 @@ import {
   CODEBUDDY_PROVIDER,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  DEFAULT_RETRY_AFTER_CEILING_MS,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 } from './constants.js'
 import { CodeBuddySession } from './session.js'
@@ -162,7 +163,14 @@ export function resolveConnectionOptions(config: Config = {}): CodeBuddyConnecti
     ),
     defaultMaxTokens: positiveInteger(config.defaultMaxTokens, 'defaultMaxTokens', DEFAULT_MAX_TOKENS),
     streamIdleTimeoutMs,
-    retryPolicy: resolveRetryPolicy(config.retryPolicy, 'dsh-llm-codebuddy: retryPolicy'),
+    // Only the fallback is tuned; a configured policy passes through untouched.
+    retryPolicy: resolveRetryPolicy(
+      config.retryPolicy ?? {
+        mode: 'normal',
+        backoff: { maxDelayMs: DEFAULT_RETRY_AFTER_CEILING_MS },
+      },
+      'dsh-llm-codebuddy: retryPolicy',
+    ),
   }
 }
 
