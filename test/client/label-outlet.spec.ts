@@ -129,6 +129,17 @@ describe('ModelLabelOutlet', () => {
     expect(html).toContain('CB Flash')
   })
 
+  it('renders composed fallback content, which is how a catalog badge lands', () => {
+    const html = renderToStaticMarkup(h(ModelLabelOutlet, {
+      face: faceOf([]),
+      owner,
+      standard: {},
+      fallback: h('span', null, h('em', null, 'New'), ' CB Flash'),
+    }))
+
+    expect(html).toContain('<em>New</em> CB Flash')
+  })
+
   it('renders the winning contributor of a live slot core', () => {
     // End to end over the real registry: the official seat declares the cell,
     // the plugin shadows the seat, and its own seat component renders the cell

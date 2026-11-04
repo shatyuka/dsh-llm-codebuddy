@@ -184,14 +184,13 @@ export function resolveConnectionOptions(config: Config = {}): CodeBuddyConnecti
  */
 function turnLookupOf(ctx: { get(name: string): unknown }): CodeBuddyTurnReader | undefined {
   const sessions = ctx.get('sessions') as { get?(id: string): { id?: unknown } | undefined }
-  const projections = ctx.get('sessionProjections') as
-    { stateOf?(session: unknown, key: string): { lastTurn?: unknown } | undefined }
-  if (typeof sessions?.get !== 'function' || typeof projections?.stateOf !== 'function') return undefined
+  const agents = ctx.get('agents') as { turnBoundaryOf?(session: unknown): { lastTurn?: unknown } | undefined }
+  if (typeof sessions?.get !== 'function' || typeof agents?.turnBoundaryOf !== 'function') return undefined
   return (sessionId) => {
     const session = sessions.get!(sessionId)
     // A cold or unattached session has no live projection state.
     if (session === undefined || session === null) return undefined
-    const turn = projections.stateOf!(session, 'turnBoundary')?.lastTurn
+    const turn = agents.turnBoundaryOf!(session)?.lastTurn
     // Zero means no turn has opened yet; it names nothing.
     return typeof turn === 'number' && Number.isInteger(turn) && turn > 0 ? turn : undefined
   }

@@ -201,15 +201,28 @@ describe('apply', () => {
       .config.turnOf
   }
 
-  it('wires a turn reader that reads the host registries', () => {
+  it('wires a turn reader over the agents service', () => {
+    const session = { id: 'sess-1' }
+    const turnBoundaryOf = vi.fn((_session: unknown) => ({ lastTurn: 4 }))
     const ctx = {
       ...contextOf(),
       get: (name: string) => name === 'sessions'
-        ? { get: () => ({ id: 'sess-1' }) }
-        : name === 'sessionProjections' ? { stateOf: () => ({ lastTurn: 4 }) } : undefined,
+        ? { get: () => session }
+        : name === 'agents' ? { turnBoundaryOf } : undefined,
     }
     apply(ctx as never)
     expect(mountedTurnOf(ctx)?.()?.('sess-1')).toBe(4)
+    expect(turnBoundaryOf).toHaveBeenCalledWith(session)
+  })
+
+  it('degrades when the agents service is absent', () => {
+    const ctx = {
+      ...contextOf(),
+      get: (name: string) => name === 'sessions' ? { get: () => ({ id: 'sess-1' }) } : undefined,
+    }
+    apply(ctx as never)
+    // No owning service leaves the reader undefined rather than failing the mount.
+    expect(mountedTurnOf(ctx)?.()).toBeUndefined()
   })
 
   it('wires a turn reader that degrades without the registries', () => {

@@ -26,6 +26,7 @@ import {
   observeStickyMenuGroups,
   rankByName,
   StateDot,
+  Tag,
   Toast,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -195,6 +196,7 @@ export function CodeBuddyModelSelect({
   directory,
   load,
   select,
+  resolveText,
   rpc,
   t,
   prefs,
@@ -246,19 +248,32 @@ export function CodeBuddyModelSelect({
     [state.groups, accountProviderName],
   )
 
-  /** Render one trigger/menu/option name through the shadowed label slot. */
+  // Render one trigger/menu/option name through the shadowed label slot. The
+  // fallback mirrors the official seat: badge before the name in the trigger,
+  // after it in menus.
   const renderLabel = (
     provider: ModelLabelOwner['provider'],
     model: ModelLabelOwner['model'],
     placement: ModelLabelOwner['placement'],
     selected: boolean,
-  ): ReactElement => h(ModelLabelOutlet, {
-    key: `${provider.id}/${model.id}/${placement}`,
-    face: labelSlot,
-    owner: { provider, model, placement, selected },
-    standard: standard as unknown as Record<string, unknown>,
-    fallback: model.name,
-  })
+  ): ReactElement => {
+    const badge = model.badge
+    return h(ModelLabelOutlet, {
+      key: `${provider.id}/${model.id}/${placement}`,
+      face: labelSlot,
+      owner: { provider, model, placement, selected },
+      standard: standard as unknown as Record<string, unknown>,
+      fallback: badge === undefined ? model.name : h('span', { className: 'cbms-badgedName' },
+        placement === 'trigger' ? h(Fragment, null,
+          h(Tag, { className: 'cbms-badge', tone: badge.tone }, resolveText(badge.text)),
+          ' ') : null,
+        h('span', { className: 'cbms-badgedNameText' }, model.name),
+        placement === 'trigger' ? null : h(Fragment, null,
+          ' ',
+          h(Tag, { className: 'cbms-badge', tone: badge.tone }, resolveText(badge.text))),
+      ),
+    })
+  }
 
   // Durable arrangement of this provider's rows, owned by the settings page.
   // The seat re-renders as the arrangement changes, so an edit while the menu
@@ -821,6 +836,9 @@ export const MODEL_SELECT_CSS = `
 .cbms-trigger:focus-visible:not([data-selection-focus]){box-shadow:0 0 0 2px var(--dsw-alias-border-l3)}
 .cbms-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
 .cbms-triggerLabel{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}
+.cbms-badgedName{vertical-align:baseline;align-items:center;gap:4px;max-width:100%;white-space:nowrap;display:inline-flex}
+.cbms-badgedNameText{text-overflow:ellipsis;min-width:0;overflow:hidden}
+.cbms-badge{flex:none}
 .cbms-triggerEffort{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-caption);flex-shrink:1000;overflow:hidden}
 .cbms-triggerIcon{display:var(--dsh-composer-model-icon-display,none);flex:none}
 .cbms-triggerLabel,.cbms-triggerEffort{display:var(--dsh-composer-model-text-display,block)}

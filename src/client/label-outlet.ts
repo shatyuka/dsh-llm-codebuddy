@@ -225,14 +225,15 @@ class LabelBoundary extends Component<LabelBoundaryProps, LabelBoundaryState> {
  * @param props.face - registry and locale reads for the label cell.
  * @param props.owner - provider/model identity and placement.
  * @param props.standard - the seat's session standard props.
- * @param props.fallback - catalog name used when no contributor renders.
+ * @param props.fallback - content used when no contributor renders; the
+ *   catalog name plus its badge, as the official seat builds it.
  * @returns the anchored identity wrapper around the contributor or fallback.
  */
 export function ModelLabelOutlet({ face, owner, standard, fallback }: {
   face: LabelSlotFace
   owner: ModelLabelOwner
   standard: Readonly<Record<string, unknown>>
-  fallback: string
+  fallback: ReactNode
 }): ReactElement {
   // Contributors register and retire independently of the seat; the locale
   // revision moves on a language switch. Two external stores, two ticks.

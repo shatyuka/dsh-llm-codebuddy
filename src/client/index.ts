@@ -1462,6 +1462,8 @@ export function apply(ctx: Context): void {
           available: sessions.subagentAddress(sessionId) === undefined,
           directory: directory.store,
           load: () => { directory.load().catch(() => {}) },
+          // Localizes a catalog badge the same way the official seat does.
+          resolveText: text => locale.resolveText(text),
           select: (selection: { provider: string, model: string, reasoningEffort?: string }) =>
             directory.select(selection),
         }

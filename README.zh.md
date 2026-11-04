@@ -21,7 +21,7 @@
 
 | 要求 | 版本 |
 | --- | --- |
-| DeepSeek Harness（`dsh`） | `>= 0.2.1-rc.1` |
+| DeepSeek Harness（`dsh`） | `>= 0.2.2-rc.1` |
 
 设置页、模型选择器、用量指示器等 Web UI 功能需要 `web` profile。
 
