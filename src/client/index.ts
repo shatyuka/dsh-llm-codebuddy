@@ -703,7 +703,7 @@ function UsagePrefRows({ t, prefs }: {
     ? 'unitCredit'
     : unit === 'cny' ? 'unitCny' : 'unitUsd')
 
-  return h(Fragment, null,
+  return h('div', { className: 'cb-prefs' },
     // Non-loopback Host: the settings transport stays process-local, so edits
     // live only in this tab.
     !persistent
@@ -1287,7 +1287,7 @@ export const inject = [
  * them under plugin-scoped classes, model rows included.
  */
 const PREF_CSS = `
-.cb-prefRow{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.cb-prefs{display:flex;flex-direction:column;gap:8px;container-type:inline-size}.cb-prefRow{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .cb-prefRowText{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0;padding-right:48px}
 .cb-prefNotice{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .cb-prefTitle{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:400;line-height:22px}
@@ -1295,8 +1295,8 @@ const PREF_CSS = `
 .cb-prefSelector{background:var(--dsw-alias-bg-module-platform);height:36px;font:inherit;color:var(--dsw-alias-label-primary);cursor:pointer;border:none;border-radius:18px;align-items:center;gap:12px;padding:0 14px;font-size:14px;line-height:22px;display:inline-flex;flex:none}
 .cb-prefSelector:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .cb-prefSelector:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.cb-prefInput{width:120px}
-.cb-prefControl{display:flex;align-items:center;gap:8px;flex:none}
+.cb-prefInput{box-sizing:border-box;width:120px;min-width:120px}
+.cb-prefControl{display:flex;align-items:center;gap:8px;flex:none}@container (max-width:440px){.cb-prefControl{flex-direction:column;align-items:flex-end}}
 .cb-accountHeader{display:flex;align-items:center;gap:12px;width:100%;padding:8px 0;border:none;border-bottom:1px solid var(--dsw-alias-border-l2);background:none;font:inherit;text-align:left;cursor:pointer}
 .cb-accountHeader:hover .cb-accountChevron{color:var(--dsw-alias-label-secondary)}
 .cb-accountHeader:focus-visible{outline:1.5px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:6px}
