@@ -11,7 +11,7 @@
  */
 
 import type { Key, ReactElement } from 'react'
-import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import {
   IconCheckOutlineRegular,
@@ -231,9 +231,11 @@ export function CodeBuddyModelSelect({
   const searchRef = useRef<HTMLInputElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const groupsRef = useRef<HTMLDivElement>(null)
-  const [menuPos, setMenuPos] = useState<{ left: number, top: number } | null>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const id = useId()
+  const anchorStyle: CSSProperties & Record<'--cbms-anchor', string> = {
+    '--cbms-anchor': `--cbms-model-${id.replaceAll(':', '')}`,
+  }
 
   // The account route shows its localized name, not the catalog's.
   const accountProviderName = t('provider.account')
@@ -408,40 +410,6 @@ export function CodeBuddyModelSelect({
       itemRefs.current[activeModelIndex]?.scrollIntoView({ block: 'nearest' })
     }
   }, [open, pane, activeModelIndex, visibleModels])
-
-  // The menu is portaled to the body, so it must be placed against the
-  // viewport by hand: anchored at the trigger's top-right, clamped inside the
-  // viewport with a margin, and re-placed on scroll or resize. While measuring
-  // (first frame), it stays hidden at the origin so offsetWidth/offsetHeight
-  // are real for the placement pass below.
-  useLayoutEffect(() => {
-    if (!available || !open) {
-      setMenuPos(null)
-      return
-    }
-    const place = (): void => {
-      const rect = triggerRef.current?.getBoundingClientRect()
-      if (rect === undefined) return
-      const MARGIN = 12
-      const lw = menuRef.current?.offsetWidth ?? 0
-      const lh = menuRef.current?.offsetHeight ?? 0
-      let x = rect.right - lw
-      let y = rect.top - 8 - lh
-      if (lw > 0) x = Math.min(Math.max(x, MARGIN), window.innerWidth - lw - MARGIN)
-      if (lh > 0) y = Math.min(Math.max(y, MARGIN), window.innerHeight - lh - MARGIN)
-      setMenuPos({ left: x, top: y })
-    }
-    place()
-    window.addEventListener('scroll', place, true)
-    window.addEventListener('resize', place)
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place)
-    if (menuRef.current !== null) observer?.observe(menuRef.current)
-    return () => {
-      observer?.disconnect()
-      window.removeEventListener('scroll', place, true)
-      window.removeEventListener('resize', place)
-    }
-  }, [available, open, pane, state, query])
 
   if (!available) return null
 
@@ -622,6 +590,7 @@ export function CodeBuddyModelSelect({
       ref: triggerRef,
       type: 'button',
       className: 'cbms-trigger',
+      style: anchorStyle,
       'aria-label': triggerAria,
       'aria-haspopup': 'menu',
       'aria-expanded': open,
@@ -648,9 +617,7 @@ export function CodeBuddyModelSelect({
       ref: menuRef,
       id: `${id}-menu`,
       className: 'cbms-menu',
-      // Before the placement pass lands, stay hidden at the origin so the
-      // menu can be measured (offsetWidth/offsetHeight) without a flash.
-      style: menuPos ?? { visibility: 'hidden', left: 0, top: 0 },
+      style: anchorStyle,
       role: pane === 'model' ? 'group' : 'menu',
       'aria-label': t('menu.aria'),
       'aria-busy': state.status === 'loading' || busy,
@@ -831,7 +798,7 @@ export function CodeBuddyModelSelect({
 /** Scoped CSS for the seat, mirroring the official ModelSelect geometry. */
 export const MODEL_SELECT_CSS = `
 .cbms-root{min-width:0;position:relative}
-.cbms-trigger{min-width:0;max-width:min(360px,45cqw);height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:24px;outline:none;align-items:center;gap:4px;padding:0 4px 0 8px;font-size:13px;font-weight:500;line-height:20px;display:flex}
+.cbms-trigger{anchor-name:var(--cbms-anchor);min-width:0;max-width:min(360px,45cqw);height:28px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;border-radius:24px;outline:none;align-items:center;gap:4px;padding:0 4px 0 8px;font-size:13px;font-weight:500;line-height:20px;display:flex}
 .cbms-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .cbms-trigger:focus-visible:not([data-selection-focus]){box-shadow:0 0 0 2px var(--dsw-alias-border-l3)}
 .cbms-trigger:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
@@ -844,7 +811,7 @@ export const MODEL_SELECT_CSS = `
 .cbms-triggerLabel,.cbms-triggerEffort{display:var(--dsh-composer-model-text-display,block)}
 .cbms-chevron{color:var(--dsw-alias-label-caption);flex:none;transition:transform .12s}
 .cbms-chevronOpen{transform:rotate(180deg)}
-.cbms-menu{z-index:1100;--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);width:max-content;min-width:min(300px,100vw - 32px);max-width:min(460px,100vw - 32px);max-height:min(360px,100vh - 96px);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2);border:0;border-radius:16px;flex-direction:column;padding:3px;display:flex;position:fixed;overflow:hidden}
+.cbms-menu{z-index:1100;--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-sizing:border-box;position:fixed;position-anchor:var(--cbms-anchor);top:max(12px,var(--dsh-frame-overlay-top,12px));left:12px;right:anchor(right);bottom:calc(anchor(top) + 8px);align-self:safe end;justify-self:safe end;margin:0;width:fit-content;height:fit-content;min-width:min(300px,100vw - 24px);max-width:min(460px,100vw - 24px);max-height:min(360px,100dvh - 96px);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2);border:0;border-radius:16px;flex-direction:column;padding:3px;display:flex;overflow:hidden}
 .cbms-status,.cbms-empty{color:var(--dsw-alias-label-tertiary);padding:8px;font-size:12px;line-height:18px}
 .cbms-error,.cbms-warning{background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);border-radius:7px;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:3px;padding:6px 7px;font-size:11px;line-height:16px;display:flex}
 .cbms-warning{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-state-warn-label)}
