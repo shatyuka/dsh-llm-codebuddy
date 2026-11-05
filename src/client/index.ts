@@ -13,7 +13,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ClientConnectionRpc, ConnectionHandle, ConnectionRpcResult } from '@deepseek-ai/dsh-client-connection/client'
+import type { ConnectionHandle, ConnectionRpcResult } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -35,6 +35,8 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { CodeBuddyModelSelect, MODEL_SELECT_CSS } from './model-select.js'
 import type { ModelSelectT } from './model-select.js'
+import { bindCodeBuddyRpc } from './bind.js'
+import type { CodeBuddyRpc } from './bind.js'
 import { LABEL_SLOT } from './label-outlet.js'
 import type { LabelSlotFace } from './label-outlet.js'
 import { badgesOf, creditsOf, rowRate } from './model-badges.js'
@@ -58,14 +60,10 @@ import {
 } from '../settings.js'
 import type { CreditUnit } from '../settings.js'
 import { usedPercent } from '../quota.js'
-import { CODEBUDDY_AUTH_CHANNEL as AUTH_CHANNEL } from '../protocol.js'
 import type { CodeBuddySiteId } from '../constants.js'
 import type {
   CodeBuddyAuthStatus as AuthStatus,
   CodeBuddyModelEntry,
-  CodeBuddyRpcEndpoint,
-  CodeBuddyRpcRequest,
-  CodeBuddyRpcResponse,
   CodeBuddyUsageResult as UsageResult,
   CodeBuddyUsageWindow as UsageWindow,
 } from '../protocol.js'
@@ -94,26 +92,6 @@ function subscribeLoginChange(listener: () => void): () => void {
 
 /** Failed RPC result used by the settings error presenter. */
 type RpcErr = Extract<ConnectionRpcResult<unknown>, { ok: false }>
-
-/** Typed view over the transport for this plugin's endpoint map. */
-interface CodeBuddyRpc {
-  call: <K extends CodeBuddyRpcEndpoint>(
-    endpoint: K,
-    payload: CodeBuddyRpcRequest<K>,
-    signal?: AbortSignal,
-  ) => Promise<ConnectionRpcResult<CodeBuddyRpcResponse<K>>>
-}
-
-/**
- * Bind the shared CodeBuddy endpoint map to Connection's intentionally untyped
- * transport boundary. All callers below are now checked against that map.
- */
-function bindCodeBuddyRpc(rpc: ClientConnectionRpc): CodeBuddyRpc {
-  return {
-    call: <K extends CodeBuddyRpcEndpoint>(endpoint: K, payload: CodeBuddyRpcRequest<K>, signal?: AbortSignal) =>
-      rpc.call(AUTH_CHANNEL, endpoint, payload, signal) as Promise<ConnectionRpcResult<CodeBuddyRpcResponse<K>>>,
-  }
-}
 
 /** How often the client polls a started login, in ms. */
 const POLL_INTERVAL_MS = 1500
@@ -1391,7 +1369,7 @@ export function apply(ctx: Context): void {
       const active = locale.getSnapshot?.()?.active
       if (active === undefined || active === last) return
       last = active
-      void Promise.resolve(rpc.call('locale', active)).catch(() => {})
+      void Promise.resolve(rpc.call('reportLocale', { tag: active })).catch(() => {})
     }
     report()
     return locale.subscribe?.(report) ?? (() => {})

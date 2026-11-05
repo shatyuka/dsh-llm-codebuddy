@@ -16,7 +16,10 @@ vi.mock('../src/codebuddy.js', async (importOriginal) => {
   }
 })
 
-import { CodeBuddyAuthService, CODEBUDDY_AUTH_CHANNEL } from '../src/auth-service.js'
+import { Context } from '@deepseek-ai/cordis'
+import { CodeBuddyService } from '../src/service.js'
+import { CodeBuddyRemote } from '../src/remote.js'
+import { resolveSite } from '../src/constants.js'
 import { MessageLocale } from '../src/locale.js'
 import { clearStorage, loadStorage, saveStorage } from '../src/storage.js'
 import { getLoginAccount, pollAuthToken, requestAuthState } from '../src/codebuddy.js'
@@ -56,56 +59,7 @@ const issuedToken = {
   domain: 'corp.example',
 }
 
-/**
- * A context double that captures what the service registers.
- *
- * `inject` runs the callback against a scope exposing the two host services;
- * `rpcHandle` decides whether the preferred registration path works or the
- * fallback route is taken.
- */
-function contextOf(options: { rpcHandle?: () => () => void } = {}) {
-  const state = {
-    effects: [] as (() => void)[],
-    fallbackRoutes: [] as { kind: string, path: string, handler: unknown }[],
-    rpcChannels: [] as string[],
-  }
-  const registered: string[] = []
-  const scope = {
-    get: (name: string) => {
-      registered.push(name)
-      if (name === 'connection') {
-        return {
-          rpc: {
-            handle: (channel: string, _handler: unknown, _options?: unknown) => {
-              const disposer = (options.rpcHandle ?? (() => () => {}))()
-              state.rpcChannels.push(channel)
-              return disposer
-            },
-          },
-          requestRejection: () => undefined,
-        }
-      }
-      return {
-        register: (route: { kind: string, path: string, handler: unknown }) => {
-          state.fallbackRoutes.push(route)
-          return () => {}
-        },
-      }
-    },
-    effect: (fn: () => unknown) => {
-      const disposer = fn()
-      if (typeof disposer === 'function') state.effects.push(disposer as () => void)
-    },
-  }
-  return {
-    state,
-    registered,
-    inject: (_deps: readonly string[], fn: (scope: unknown) => void) => { fn(scope) },
-    effect: (fn: () => unknown) => { fn() },
-  }
-}
-
-/** A session double over the face the auth service reads. */
+/** A session double over the face the service reads. */
 function sessionOf(over: {
   usable?: boolean
   models?: readonly CodeBuddyModel[]
@@ -135,43 +89,17 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('channel registration', () => {
-  it('registers the private channel through the connection service', () => {
-    const ctx = contextOf()
-    new CodeBuddyAuthService(ctx as never)
-    expect(ctx.state.rpcChannels).toEqual([CODEBUDDY_AUTH_CHANNEL])
-    expect(ctx.state.fallbackRoutes).toEqual([])
-  })
-
-  it('falls back to a prefix route when the registry path throws', () => {
-    // dsh 0.1.5-rc.1 could not read `webServer` through the connection
-    // service's own fiber; the equivalent prefix route keeps the client half
-    // working unchanged.
-    const ctx = contextOf({ rpcHandle: () => { throw new Error('strict service access') } })
-    new CodeBuddyAuthService(ctx as never)
-    expect(ctx.state.fallbackRoutes).toHaveLength(1)
-    expect(ctx.state.fallbackRoutes[0]).toMatchObject({ kind: 'prefix', path: CODEBUDDY_AUTH_CHANNEL })
-  })
-
-  it('reuses the connection trust fence on the fallback route', () => {
-    const ctx = contextOf({ rpcHandle: () => { throw new Error('nope') } })
-    new CodeBuddyAuthService(ctx as never)
-    expect(ctx.registered).toContain('connection')
-    expect(ctx.registered).toContain('webServer')
-  })
-})
-
 describe('status', () => {
   it('reports signed out when nothing is stored', async () => {
     load.mockResolvedValue(undefined)
-    await expect(new CodeBuddyAuthService(contextOf() as never).status()).resolves.toEqual({ loggedIn: false })
+    await expect(new CodeBuddyService().status()).resolves.toEqual({ loggedIn: false })
   })
 
   it('reports the account facts of a usable credential', async () => {
     load.mockResolvedValue(stored({
       account: { uid: 'u', nickname: 'Nick', uin: '123', enterpriseId: 'ent', enterpriseName: 'Corp', enterpriseUserName: 'nick', departmentFullName: 'R&D' },
     }))
-    const status = await new CodeBuddyAuthService(contextOf() as never, sessionOf({ usable: true }) as never).status()
+    const status = await new CodeBuddyService(sessionOf({ usable: true }) as never).status()
     expect(status).toEqual({
       loggedIn: true,
       nickname: 'Nick',
@@ -187,7 +115,7 @@ describe('status', () => {
 
   it('omits the fields the account did not disclose', async () => {
     load.mockResolvedValue(stored({ account: { uid: 'u', nickname: 'Nick' } }))
-    const status = await new CodeBuddyAuthService(contextOf() as never, sessionOf() as never).status()
+    const status = await new CodeBuddyService(sessionOf() as never).status()
     for (const key of ['uin', 'enterpriseId', 'enterpriseName', 'enterpriseUserName', 'departmentFullName']) {
       expect(status, key).not.toHaveProperty(key)
     }
@@ -197,7 +125,7 @@ describe('status', () => {
     load.mockResolvedValue(stored({
       auth: { accessToken: 'a', expiresAt: Date.now() + 1_000, refreshToken: 'r', refreshExpiresAt: Date.now() + 2_000, domain: '' },
     }))
-    const status = await new CodeBuddyAuthService(contextOf() as never, sessionOf() as never).status()
+    const status = await new CodeBuddyService(sessionOf() as never).status()
     expect(status).not.toHaveProperty('domain')
   })
 
@@ -205,13 +133,13 @@ describe('status', () => {
     // Otherwise the page shows an account while every request fails and the
     // model list is empty.
     load.mockResolvedValue(stored())
-    await expect(new CodeBuddyAuthService(contextOf() as never, sessionOf({ usable: false }) as never).status())
+    await expect(new CodeBuddyService(sessionOf({ usable: false }) as never).status())
       .resolves.toEqual({ loggedIn: false, expired: true })
   })
 
   it('reports a stored credential as signed in when no session can probe it', async () => {
     load.mockResolvedValue(stored())
-    await expect(new CodeBuddyAuthService(contextOf() as never).status()).resolves.toMatchObject({ loggedIn: true })
+    await expect(new CodeBuddyService().status()).resolves.toMatchObject({ loggedIn: true })
   })
 })
 
@@ -221,7 +149,7 @@ describe('usage', () => {
       windows: [{ name: 'base', used: 10, limit: 100, usedPercent: 10, resetsAt: '2024-01-01 00:00:00' }],
       primary: { name: 'total', used: 10, limit: 100, usedPercent: 10 },
     }
-    const service = new CodeBuddyAuthService(contextOf() as never, sessionOf({ usage: snapshot }) as never)
+    const service = new CodeBuddyService(sessionOf({ usage: snapshot }) as never)
     await expect(service.usage()).resolves.toEqual({
       loggedIn: true,
       windows: [{ name: 'base', used: 10, limit: 100, usedPercent: 10, resetsAt: '2024-01-01 00:00:00' }],
@@ -231,12 +159,12 @@ describe('usage', () => {
 
   it('keeps an uncapped window\'s absent figures absent rather than defaulting them', async () => {
     const snapshot: UsageSnapshot = { windows: [{ name: 'uncapped' }] }
-    const service = new CodeBuddyAuthService(contextOf() as never, sessionOf({ usage: snapshot }) as never)
+    const service = new CodeBuddyService(sessionOf({ usage: snapshot }) as never)
     await expect(service.usage()).resolves.toEqual({ loggedIn: true, windows: [{ name: 'uncapped' }] })
   })
 
   it('reports a signed-out shape when the meter produced nothing', async () => {
-    const service = new CodeBuddyAuthService(contextOf() as never, sessionOf({ usage: undefined }) as never)
+    const service = new CodeBuddyService(sessionOf({ usage: undefined }) as never)
     await expect(service.usage()).resolves.toEqual({ loggedIn: false, windows: [] })
   })
 })
@@ -257,8 +185,7 @@ describe('models', () => {
 
   it('ships only the models the adapter would offer', async () => {
     const unsized: CodeBuddyModel = { id: 'image-gen', name: 'Image Gen' }
-    const service = new CodeBuddyAuthService(
-      contextOf() as never,
+    const service = new CodeBuddyService(
       sessionOf({ models: [offerable, unsized] }) as never,
     )
     const result = await service.models()
@@ -267,8 +194,7 @@ describe('models', () => {
   })
 
   it('carries the credits, tags, and one resolved description', async () => {
-    const service = new CodeBuddyAuthService(
-      contextOf() as never,
+    const service = new CodeBuddyService(
       sessionOf({ models: [offerable] }) as never,
       new MessageLocale(),
     )
@@ -285,23 +211,23 @@ describe('models', () => {
   it('resolves the description in the language the client reported', async () => {
     const locale = new MessageLocale()
     locale.report('zh-CN')
-    const service = new CodeBuddyAuthService(contextOf() as never, sessionOf({ models: [offerable] }) as never, locale)
+    const service = new CodeBuddyService(sessionOf({ models: [offerable] }) as never, locale)
     expect((await service.models()).models[0]?.description).toBe('中文说明')
   })
 
   it('falls back to the other wording when the preferred one is absent', async () => {
     const { descriptionEn: _omit, ...onlyZh } = offerable
-    const service = new CodeBuddyAuthService(contextOf() as never, sessionOf({ models: [onlyZh] }) as never)
+    const service = new CodeBuddyService(sessionOf({ models: [onlyZh] }) as never)
     expect((await service.models()).models[0]?.description).toBe('中文说明')
   })
 
   it('reports signed out without reading a catalog when the session is unusable', async () => {
-    const service = new CodeBuddyAuthService(contextOf() as never, sessionOf({ usable: false }) as never)
+    const service = new CodeBuddyService(sessionOf({ usable: false }) as never)
     await expect(service.models()).resolves.toEqual({ loggedIn: false, models: [] })
   })
 
   it('reports signed out when there is no session at all', async () => {
-    await expect(new CodeBuddyAuthService(contextOf() as never).models()).resolves.toEqual({ loggedIn: false, models: [] })
+    await expect(new CodeBuddyService().models()).resolves.toEqual({ loggedIn: false, models: [] })
   })
 })
 
@@ -322,8 +248,7 @@ describe('model promotions', () => {
   async function displayOf(promotions: readonly unknown[], language?: string): Promise<unknown> {
     const locale = new MessageLocale()
     if (language !== undefined) locale.report(language)
-    const service = new CodeBuddyAuthService(
-      contextOf() as never,
+    const service = new CodeBuddyService(
       sessionOf({ models: [entry], promotions }) as never,
       locale,
     )
@@ -410,14 +335,14 @@ describe('browser login', () => {
     // A login run that never settles keeps the entry pending for the poll.
     poll.mockImplementation(() => new Promise(() => {}))
 
-    const service = new CodeBuddyAuthService(contextOf() as never)
+    const service = new CodeBuddyService()
     await expect(service.startLogin('cn')).resolves.toEqual({ authUrl: 'https://login.example/st-1', state: 'st-1' })
     expect(startState).toHaveBeenCalledWith('cn')
   })
 
   it('reports an unknown handshake as not done rather than failing the poll', async () => {
     // The client's poll loop may outlive the entry by one tick.
-    const service = new CodeBuddyAuthService(contextOf() as never)
+    const service = new CodeBuddyService()
     await expect(service.pollLogin('never-started')).resolves.toEqual({ done: false })
   })
 
@@ -426,7 +351,7 @@ describe('browser login', () => {
     poll.mockResolvedValue(issuedToken)
     account.mockResolvedValue({ uid: 'uid-1', nickname: 'Nick' })
     const session = sessionOf()
-    const service = new CodeBuddyAuthService(contextOf() as never, session as never)
+    const service = new CodeBuddyService(session as never)
 
     await service.startLogin('intl')
     await expect(service.pollLogin('st-1')).resolves.toEqual({ done: true, nickname: 'Nick' })
@@ -444,7 +369,7 @@ describe('browser login', () => {
   it('reports not done when the handshake was refused or timed out', async () => {
     startState.mockResolvedValue({ state: 'st-1', authUrl: 'https://login.example/st-1' })
     poll.mockResolvedValue(undefined)
-    const service = new CodeBuddyAuthService(contextOf() as never)
+    const service = new CodeBuddyService()
 
     await service.startLogin('cn')
     await expect(service.pollLogin('st-1')).resolves.toEqual({ done: false })
@@ -455,29 +380,23 @@ describe('browser login', () => {
     startState.mockResolvedValue({ state: 'st-1', authUrl: 'https://login.example/st-1' })
     poll.mockResolvedValue(issuedToken)
     account.mockRejectedValue(new Error('account read failed'))
-    const service = new CodeBuddyAuthService(contextOf() as never)
+    const service = new CodeBuddyService()
 
     await service.startLogin('cn')
     await expect(service.pollLogin('st-1')).resolves.toEqual({ done: false })
     expect(save).not.toHaveBeenCalled()
   })
 
-  it('resolves an unknown site from the RPC payload to the default one', async () => {
-    // `startLogin` itself takes an already-resolved site; the narrowing lives
-    // in the dispatcher, which is where a payload from the client arrives.
+  it('resolves an unknown site to the default one', async () => {
+    // The Remote method takes a declared site; `resolveSite` narrows whatever
+    // the browser sends before it reaches `startLogin`.
     startState.mockResolvedValue({ state: 'st-1', authUrl: 'https://login.example/st-1' })
     poll.mockImplementation(() => new Promise(() => {}))
-    const service = new CodeBuddyAuthService(contextOf() as never)
-    const dispatch = (service as unknown as {
-      dispatch: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>
-    }).dispatch.bind(service)
+    const service = new CodeBuddyService()
 
-    await dispatch('startLogin', { site: 'mars' }, new AbortController().signal)
-    expect(startState).toHaveBeenLastCalledWith('cn')
-    await dispatch('startLogin', {}, new AbortController().signal)
-    expect(startState).toHaveBeenLastCalledWith('cn')
-    await dispatch('startLogin', { site: 'intl' }, new AbortController().signal)
-    expect(startState).toHaveBeenLastCalledWith('intl')
+    await service.startLogin(resolveSite('mars'))
+
+    expect(startState).toHaveBeenCalledWith('cn')
   })
 
   it('cancels a started handshake without persisting anything', async () => {
@@ -489,7 +408,7 @@ describe('browser login', () => {
       })
       return undefined
     })
-    const service = new CodeBuddyAuthService(contextOf() as never)
+    const service = new CodeBuddyService()
 
     await service.startLogin('cn')
     await expect(service.cancelLogin('st-1')).resolves.toBeUndefined()
@@ -498,7 +417,7 @@ describe('browser login', () => {
   })
 
   it('treats cancelling an unknown handshake as a no-op', async () => {
-    const service = new CodeBuddyAuthService(contextOf() as never)
+    const service = new CodeBuddyService()
     await expect(service.cancelLogin('never-started')).resolves.toBeUndefined()
   })
 
@@ -508,7 +427,7 @@ describe('browser login', () => {
     // The account read is where a cancel can still land; the run re-checks
     // the signal before building any credential.
     account.mockImplementation(async () => ({ uid: 'u', nickname: 'N' }))
-    const service = new CodeBuddyAuthService(contextOf() as never)
+    const service = new CodeBuddyService()
 
     await service.startLogin('cn')
     const cancelled = service.cancelLogin('st-1')
@@ -522,7 +441,7 @@ describe('browser login', () => {
 describe('logout', () => {
   it('clears the store and invalidates both caches', async () => {
     const session = sessionOf()
-    const service = new CodeBuddyAuthService(contextOf() as never, session as never)
+    const service = new CodeBuddyService(session as never)
     await expect(service.logout()).resolves.toBeUndefined()
     expect(clear).toHaveBeenCalledTimes(1)
     expect(session.invalidate).toHaveBeenCalledTimes(1)
@@ -539,7 +458,7 @@ describe('logout', () => {
       })
       return undefined
     })
-    const service = new CodeBuddyAuthService(contextOf() as never)
+    const service = new CodeBuddyService()
     await service.startLogin('cn')
     // Let the run reach its poll before the logout cancels it.
     await vi.waitFor(() => expect(pollStarted).toBe(true))
@@ -551,32 +470,14 @@ describe('logout', () => {
 })
 
 describe('locale reporting', () => {
-  it('records the tag the client reports over the wire', async () => {
+  it('records the tag the Remote method receives', async () => {
     // The language is resolved browser-side, so this report is the host's only
-    // source for it.
+    // source for it; the Remote namespace is the wire entry point now.
     const locale = new MessageLocale()
-    const ctx = contextOf()
-    const service = new CodeBuddyAuthService(ctx as never, sessionOf() as never, locale)
-    // Reach the dispatcher through the registered channel handler.
-    const handler = (ctx as unknown as { state: { rpcChannels: string[] } }).state.rpcChannels
-    expect(handler).toHaveLength(1)
-    // `dispatch` is private; the observable contract is that a reported tag
-    // reaches the locale object the models projection reads.
-    const dispatch = (service as unknown as {
-      dispatch: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>
-    }).dispatch.bind(service)
-    await dispatch('locale', 'zh-CN', new AbortController().signal)
+    const ctx = new Context()
+    ctx.provide('typert', { local: new Map() } as never)
+    const remote = new CodeBuddyRemote(ctx, new CodeBuddyService(), locale)
+    await remote.reportLocale('zh-CN')
     expect(locale.tag()).toBe('zh-CN')
-  })
-
-  it('fails an unknown endpoint instead of throwing', async () => {
-    const service = new CodeBuddyAuthService(contextOf() as never)
-    const dispatch = (service as unknown as {
-      dispatch: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>
-    }).dispatch.bind(service)
-    await expect(dispatch('nope', {}, new AbortController().signal)).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'not-found' },
-    })
   })
 })

@@ -1,4 +1,26 @@
+import ts from 'typescript'
 import { defineConfig } from 'vitest/config'
+
+/**
+ * Oxc passes `@Remote` through unchanged and Node's ESM loader then rejects it,
+ * so only files carrying the syntax are rewritten here.
+ * @returns the pre-transform Vite plugin.
+ */
+function standardDecoratorPlugin() {
+  return {
+    name: 'dsh-llm-codebuddy-standard-decorators',
+    enforce: 'pre' as const,
+    transform(code: string, id: string) {
+      const file = id.split('?', 1)[0]!
+      if (!/\.[cm]?tsx?$/u.test(file) || !/^\s*@[A-Za-z_$]/mu.test(code)) return
+      const { outputText, sourceMapText } = ts.transpileModule(code, {
+        fileName: file,
+        compilerOptions: { target: ts.ScriptTarget.ES2024, module: ts.ModuleKind.ESNext, sourceMap: true },
+      })
+      return { code: outputText.replace(/\n?\/\/# sourceMappingURL=.*$/u, '\n'), map: sourceMapText }
+    },
+  }
+}
 
 /**
  * Test runner configuration.
@@ -18,6 +40,7 @@ import { defineConfig } from 'vitest/config'
  * the package itself publishes.
  */
 export default defineConfig({
+  plugins: [standardDecoratorPlugin()],
   test: {
     include: ['test/**/*.spec.ts'],
     environment: 'node',

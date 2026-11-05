@@ -14,7 +14,8 @@ import { resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { CodeBuddyAdapter } from './adapter.js'
 import type { CodeBuddyConnectionOptions, CodeBuddyTurnReader } from './adapter.js'
-import { CodeBuddyAuthService } from './auth-service.js'
+import { CodeBuddyService } from './service.js'
+import { CodeBuddyRemote } from './remote.js'
 import {
   CODEBUDDY_PROVIDER,
   DEFAULT_CONTEXT_WINDOW,
@@ -37,7 +38,8 @@ import type { CreditUnit } from './settings.js'
 
 export { CodeBuddyAdapter, httpErrorCode } from './adapter.js'
 export type { CodeBuddyAdapterOptions, CodeBuddyConnectionOptions, CodeBuddyTurnReader } from './adapter.js'
-export { CodeBuddyAuthService, CODEBUDDY_AUTH_CHANNEL } from './auth-service.js'
+export { CodeBuddyService } from './service.js'
+export { CodeBuddyRemote, CODEBUDDY_SERVICE } from './remote.js'
 export type {
   CodeBuddyAuthStatus,
   CodeBuddyLoginStart,
@@ -47,7 +49,7 @@ export type {
   CodeBuddyPromotionView,
   CodeBuddyUsageResult,
   CodeBuddyUsageWindow,
-} from './auth-service.js'
+} from './service.js'
 export { CodeBuddySession, NotLoggedInError, SessionUnavailableError } from './session.js'
 export { login } from './login.js'
 export type { LoginHooks, LoginResult } from './login.js'
@@ -234,7 +236,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     return () => { clearInterval(timer) }
   }, 'dsh-llm-codebuddy: catalog change polling')
 
-  new CodeBuddyAuthService(ctx, session, messageLocale)
+  const service = new CodeBuddyService(session, messageLocale)
+  new CodeBuddyRemote(ctx, service, messageLocale)
 
   // A signed-out mount is legitimate; saying so once at load keeps the first
   // request's sign-in explanation from being a surprise.

@@ -156,9 +156,14 @@ describe('apply', () => {
         effects.push(label ?? '')
         return fn()
       },
-      // The auth service registers itself through this; the route surface is
-      // covered by its own suite.
-      inject: (_deps: readonly string[], _fn: (scope: unknown) => void) => undefined,
+      // `CodeBuddyRemote` is a Service, so a real Context's reflection is needed.
+      reflect: {
+        provide: () => () => {},
+        props: {},
+        store: {},
+      },
+      fiber: { runtime: null, inject: {} },
+      isolate: () => ({}),
     }
   }
 

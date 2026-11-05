@@ -1,15 +1,11 @@
 /**
- * Browser/Host contract for the private CodeBuddy RPC channel.
+ * Browser/Host contract for the CodeBuddy Remote namespace.
  *
- * This module is runtime-neutral: both halves import the channel constant and
- * share these data-only request/response types without pulling Host code into
- * the browser bundle.
+ * This module is runtime-neutral: both halves share these data-only
+ * request/response types without pulling Host code into the browser bundle.
  */
 
 import type { CodeBuddySiteId } from './constants.js'
-
-/** Logical RPC channel owned by the CodeBuddy authentication service. */
-export const CODEBUDDY_AUTH_CHANNEL = '/codebuddy'
 
 /** Current CodeBuddy authentication state. */
 export interface CodeBuddyAuthStatus {
@@ -86,7 +82,7 @@ export interface CodeBuddyRpcMap {
   logout: { request: Record<string, never>, response: void }
   usage: { request: Record<string, never>, response: CodeBuddyUsageResult }
   models: { request: Record<string, never>, response: CodeBuddyModelsResult }
-  locale: { request: string, response: null }
+  reportLocale: { request: { tag: string }, response: void }
 }
 
 export type CodeBuddyRpcEndpoint = keyof CodeBuddyRpcMap
