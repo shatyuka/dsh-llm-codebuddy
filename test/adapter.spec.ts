@@ -821,3 +821,82 @@ describe('stream — HTTP failures', () => {
       .rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
   })
 })
+
+describe('stream — faults after the response started', () => {
+  /** A body that delivers one payload and then fails, the way a gateway dropping a half-sent answer does. */
+  function droppedBody(payload: string, failure: Error): Response {
+    const encoder = new TextEncoder()
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${payload}\n\n`))
+      },
+      pull(controller) {
+        controller.error(failure)
+      },
+    }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+
+  it('labels a mid-response fault as a retryable transport fault', async () => {
+    // undici reports a dropped connection as a bare `TypeError: terminated`.
+    vi.stubGlobal('fetch', vi.fn(async () => droppedBody(
+      JSON.stringify({ choices: [{ delta: { content: 'partial' } }] }),
+      new TypeError('terminated'),
+    )))
+    await expect(drain(adapterOf(sessionOf()), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({
+        code: 'TRANSPORT',
+        message: expect.stringContaining('https://copilot.tencent.com/v2') as unknown as string,
+      })
+  })
+
+  it('keeps the delivered content before reporting the fault', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => droppedBody(
+      JSON.stringify({ choices: [{ delta: { content: 'partial' } }] }),
+      new TypeError('terminated'),
+    )))
+    const chunks: StreamChunk[] = []
+    await expect(async () => {
+      for await (const chunk of adapterOf(sessionOf()).stream({
+        provider: 'codebuddy', model: 'm', messages: [],
+      } as never)) chunks.push(chunk)
+    }).rejects.toMatchObject({ code: 'TRANSPORT' })
+    expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: 'partial' })
+  })
+
+  it('labels a fault during an aborted request as an abort', async () => {
+    const controller = new AbortController()
+    vi.stubGlobal('fetch', vi.fn(async () => droppedBody(
+      JSON.stringify({ choices: [{ delta: { content: 'partial' } }] }),
+      new DOMException('This operation was aborted', 'AbortError'),
+    )))
+    const adapter = adapterOf(sessionOf())
+    const drainAborting = async (): Promise<void> => {
+      for await (const chunk of adapter.stream({
+        provider: 'codebuddy', model: 'm', messages: [], signal: controller.signal,
+      } as never)) {
+        // Abort once the first payload has arrived, so the fault lands mid-stream.
+        controller.abort()
+        void chunk
+      }
+    }
+    await expect(drainAborting()).rejects.toMatchObject({ code: 'ABORTED' })
+  })
+
+  it('leaves an already-classified truncation as its own code', async () => {
+    // A body ending without `[DONE]` keeps the SSE reader's own classification.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      `data: ${JSON.stringify({ choices: [{ delta: { content: 'partial' } }] })}\n\n`,
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    )))
+    await expect(drain(adapterOf(sessionOf()), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .rejects.toMatchObject({ code: 'STREAM_CLOSED' })
+  })
+
+  it('completes a response that ends with the sentinel', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => sseResponse([
+      { choices: [{ delta: { content: 'ok' } }, { finish_reason: 'stop' }] },
+    ])))
+    await expect(drain(adapterOf(sessionOf()), { provider: 'codebuddy', model: 'm', messages: [] }))
+      .resolves.toContainEqual({ type: 'finish', reason: { kind: 'stop' } })
+  })
+})

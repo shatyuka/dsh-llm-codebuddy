@@ -604,7 +604,21 @@ export class CodeBuddyAdapter extends LlmAdapter {
       throw new LlmError('CodeBuddy API returned no response body', 'EMPTY_RESPONSE')
     }
 
-    yield* translate(parseSse(response.body), options.tools)
+    // A dropped connection surfaces from the body reader as a bare fetch fault,
+    // which carries no harness code and would end the turn instead of retrying.
+    try {
+      yield* translate(parseSse(response.body), options.tools)
+    } catch (error: unknown) {
+      if (options.signal?.aborted) {
+        throw new LlmError('CodeBuddy request aborted by caller', 'ABORTED', { cause: error })
+      }
+      if (error instanceof LlmError) throw error
+      throw new LlmError(
+        `CodeBuddy stream from ${chatBase} failed`,
+        'TRANSPORT',
+        { cause: error },
+      )
+    }
   }
 }
 
