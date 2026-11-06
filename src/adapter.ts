@@ -33,6 +33,7 @@ import type {
   ResolvedRetryPolicy,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef, ImageRequestTarget } from '@deepseek-ai/dsh-attachment'
 import {
   CODEBUDDY_DISPLAY_NAME,
   CODEBUDDY_IDE_USER_AGENT,
@@ -50,7 +51,7 @@ import { adjustOptions } from './prompt.js'
 import { wordingKeys } from './locale.js'
 import { parseSse } from './sse.js'
 import type { AttachmentReader } from './serialize.js'
-import { serializeRequest } from './serialize.js'
+import { requestImageTarget, serializeRequest } from './serialize.js'
 import { translate } from './translate.js'
 import { hasDisclosedCapacity } from './types.js'
 import type { CodeBuddyModel, WireError, WireWording } from './types.js'
@@ -414,6 +415,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
 
   override providerRetryPolicy(_provider: string): ResolvedRetryPolicy | undefined {
     return this.config.options().retryPolicy
+  }
+
+  override imageRequestTarget(_provider: string, _model: string, image: ImageAttachmentRef): ImageRequestTarget {
+    return requestImageTarget(image)
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {

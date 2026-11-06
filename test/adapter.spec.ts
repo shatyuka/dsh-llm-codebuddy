@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CodeBuddyAdapter, httpErrorCode } from '../src/adapter.js'
 import type { CodeBuddyConnectionOptions } from '../src/adapter.js'
@@ -476,6 +477,58 @@ describe('stream — request construction', () => {
         source: { kind: 'user' },
       })],
     })).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+  })
+})
+
+describe('imageRequestTarget', () => {
+  it('reports the same target the serializer downloads', async () => {
+    // A mismatch here makes consumers budget for the source image while the
+    // request carries a resized one.
+    const reads: { target: { width: number, height: number, maxBytes: number } }[] = []
+    const source = { attachmentId: 'i', mediaType: 'image/png', bytes: 8_000_000, width: 1920, height: 1080 }
+    vi.stubGlobal('fetch', vi.fn(async () => sseResponse([
+      { choices: [{ delta: { content: 'ok' } }, { finish_reason: 'stop' }] },
+    ])))
+    const adapter = new CodeBuddyAdapter({
+      session: sessionOf({ models: [catalogEntry({ id: 'vision', supportsImages: true })] }) as never,
+      options: () => DEFAULT_CONNECTION,
+      resolveAttachments: () => ({
+        readImageRequest: async (ref, target) => {
+          reads.push({ target })
+          return {
+            variantId: ImageVariantId('variant-i'),
+            attachment: ref,
+            data: new Uint8Array([1, 2, 3]),
+            mediaType: 'image/png',
+            bytes: 3,
+            width: target.width,
+            height: target.height,
+            depth: 'uchar',
+            space: 'srgb',
+            hasAlpha: false,
+          }
+        },
+      }),
+    })
+    const message = createUserMessage({
+      content: [{ type: 'image', attachment: source as never }],
+      source: { kind: 'user' },
+    })
+    await drain(adapter, { provider: 'codebuddy', model: 'vision', messages: [message] })
+
+    const requested = adapter.imageRequestTarget('codebuddy', 'vision', source as never)
+    expect(reads).toHaveLength(1)
+    expect(reads[0]?.target).toEqual(requested)
+  })
+
+  it('never enlarges an image that already fits', () => {
+    const adapter = adapterOf(sessionOf())
+    const small = { attachmentId: 'i', mediaType: 'image/png', bytes: 500, width: 320, height: 240 }
+    expect(adapter.imageRequestTarget('codebuddy', 'm', small as never)).toEqual({
+      width: 320,
+      height: 240,
+      maxBytes: 1024 * 1024,
+    })
   })
 })
 

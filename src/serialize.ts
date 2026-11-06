@@ -58,7 +58,7 @@ const REQUEST_IMAGE_MAX_PIXELS = 640_000
 const REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 
 /** Deterministic request target for one source image; never enlarged. */
-function requestImageTarget(ref: ImageAttachmentRef): ImageRequestTarget {
+export function requestImageTarget(ref: ImageAttachmentRef): ImageRequestTarget {
   return { ...requestImageDimensions(ref.width, ref.height, REQUEST_IMAGE_MAX_PIXELS), maxBytes: REQUEST_IMAGE_MAX_BYTES }
 }
 
