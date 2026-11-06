@@ -284,6 +284,52 @@ describe('stream — request construction', () => {
     expect(init.headers).toMatchObject({ 'X-Conversation-ID': 'session-1' })
   })
 
+  it('dispatches through the connection captured at preparation', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([
+      { choices: [{ delta: { content: 'x' } }, { finish_reason: 'stop' }] },
+    ]))
+    vi.stubGlobal('fetch', fetchMock)
+    let current: CodeBuddyConnectionOptions = { ...DEFAULT_CONNECTION, baseURL: 'https://first.example/v2' }
+    const adapter = new CodeBuddyAdapter({
+      session: sessionOf() as never,
+      options: () => current,
+      language: () => undefined,
+    })
+
+    const prepared = await adapter.prepareCall('codebuddy', 'm')
+    current = { ...DEFAULT_CONNECTION, baseURL: 'https://second.example/v2' }
+    const chunks: StreamChunk[] = []
+    for await (const chunk of prepared.stream({ provider: 'codebuddy', model: 'm', messages: [] })) chunks.push(chunk)
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://first.example/v2/chat/completions')
+    expect(chunks).toContainEqual({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('derives the model metadata from that same connection', async () => {
+    let current: CodeBuddyConnectionOptions = {
+      ...DEFAULT_CONNECTION,
+      baseURL: 'https://first.example/v2',
+      defaultContextWindow: 1_000,
+    }
+    const adapter = new CodeBuddyAdapter({
+      session: sessionOf() as never,
+      options: () => {
+        // Every read after the first hands back the edited generation.
+        const observed = current
+        current = { ...current, defaultContextWindow: 9_000, baseURL: 'https://second.example/v2' }
+        return observed
+      },
+      language: () => undefined,
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => sseResponse([
+      { choices: [{ delta: { content: 'x' } }, { finish_reason: 'stop' }] },
+    ])))
+
+    const prepared = await adapter.prepareCall('codebuddy', 'unlisted')
+    expect(prepared.model.context?.contextWindow).toBe(1_000)
+  })
+
   it('sends one X-Conversation-Request-ID per turn and nothing else', async () => {
     const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: { content: 'x' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }]))
     vi.stubGlobal('fetch', fetchMock)

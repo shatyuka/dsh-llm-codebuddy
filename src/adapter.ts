@@ -29,6 +29,7 @@ import type {
   LlmProviderInfo,
   LlmReasoningEffortInfo,
   LlmResolvedModelInfo,
+  PreparedAdapterCall,
   RequestMessage,
   ResolvedRetryPolicy,
   StreamChunk,
@@ -421,6 +422,15 @@ export class CodeBuddyAdapter extends LlmAdapter {
     return requestImageTarget(image)
   }
 
+  /** Dispatch through the connection resolved alongside the model metadata. */
+  override async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall> {
+    const connection = this.config.options()
+    return {
+      model: await this.resolveModel(provider, model, signal, connection),
+      stream: options => this.stream(options, connection),
+    }
+  }
+
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const models = await this.config.session.modelsOrEmpty()
     // Entries whose capacities the catalog withholds are left out rather than
@@ -437,8 +447,11 @@ export class CodeBuddyAdapter extends LlmAdapter {
     provider: string,
     model: string,
     signal?: AbortSignal,
+    resolved?: CodeBuddyConnectionOptions,
   ): Promise<LlmResolvedModelInfo> {
-    const connection = this.config.options()
+    // A prepared call shares the connection with its dispatch, so metadata and
+    // endpoint cannot describe different generations.
+    const connection = resolved ?? this.config.options()
     const models = await this.config.session.modelsOrEmpty(signal)
     const entry = models.find(candidate => candidate.id === model)
     if (entry === undefined) {
@@ -474,11 +487,14 @@ export class CodeBuddyAdapter extends LlmAdapter {
     }
   }
 
-  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async * stream(
+    options: GenerateOptions,
+    prepared?: CodeBuddyConnectionOptions,
+  ): AsyncIterable<StreamChunk> {
     // One resolution per call, before the first yield: the endpoint facts and
     // the identity freeze together, so a token refreshed mid-stream cannot be
     // paired with a different generation's endpoint.
-    const connection = this.config.options()
+    const connection = prepared ?? this.config.options()
     // Resolved once: a concurrent login or logout between two resolutions could
     // pair one site's host with the other site's token.
     let identity: CodeBuddyIdentity
