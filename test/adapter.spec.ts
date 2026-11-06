@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CodeBuddyAdapter, httpErrorCode } from '../src/adapter.js'
@@ -259,6 +261,15 @@ describe('stream — request construction', () => {
       'user-agent': 'CodeBuddyIDE/4.12.0',
       'X-Model-ID': 'm',
     })
+  })
+
+  it('refuses a redirected request instead of resending the conversation', async () => {
+    const fetchMock = vi.fn(async () => sseResponse([{ choices: [{ delta: {}, finish_reason: 'stop' }] }]))
+    vi.stubGlobal('fetch', fetchMock)
+    await drain(adapterOf(sessionOf()), { provider: 'codebuddy', model: 'm', messages: [] })
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(init.redirect).toBe('error')
   })
 
   it('follows an explicit baseURL override and adds the conversation id', async () => {
@@ -819,6 +830,45 @@ describe('stream — HTTP failures', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 200 })))
     await expect(drain(adapterOf(sessionOf()), { provider: 'codebuddy', model: 'm', messages: [] }))
       .rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
+  })
+})
+
+describe('stream — redirects', () => {
+  /** Node's real fetch, restored around each case: `redirect: 'error'` is a transport behavior a stub cannot show. */
+  async function realFetch<T>(run: () => Promise<T>): Promise<T> {
+    vi.unstubAllGlobals()
+    return run()
+  }
+
+  it('does not resend the conversation to a redirect target', async () => {
+    const reached: string[] = []
+    const target = createServer((req, res) => {
+      reached.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end('data: [DONE]\n\n')
+    })
+    await new Promise<void>(resolve => { target.listen(0, '127.0.0.1', resolve) })
+    const { port } = target.address() as AddressInfo
+    const gateway = createServer((_req, res) => {
+      res.writeHead(307, { location: `http://127.0.0.1:${port}/steal` })
+      res.end()
+    })
+    await new Promise<void>(resolve => { gateway.listen(0, '127.0.0.1', resolve) })
+    const { port: gatewayPort } = gateway.address() as AddressInfo
+
+    try {
+      await realFetch(async () => {
+        const adapter = adapterOf(sessionOf(), { ...DEFAULT_CONNECTION, baseURL: `http://127.0.0.1:${gatewayPort}` })
+        await expect(drain(adapter, {
+          provider: 'codebuddy', model: 'm',
+          messages: [createUserMessage({ content: [{ type: 'text', text: 'secret' }], source: { kind: 'user' } })],
+        })).rejects.toMatchObject({ code: 'TRANSPORT' })
+      })
+      expect(reached).toEqual([])
+    } finally {
+      target.close()
+      gateway.close()
+    }
   })
 })
 

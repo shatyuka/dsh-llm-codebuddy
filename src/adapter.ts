@@ -539,6 +539,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
     try {
       response = await fetch(`${chatBase}/chat/completions`, {
         method: 'POST',
+        redirect: 'error',
         headers: {
           ...headers,
           'content-type': 'application/json',
