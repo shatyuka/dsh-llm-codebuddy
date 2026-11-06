@@ -335,6 +335,20 @@ describe('translate — terminal protocol obligations', () => {
     })
   })
 
+  it('fails as malformed on a payload that is not an object', async () => {
+    for (const payload of ['null', '[]', '42', '"text"', 'true']) {
+      await expect(chunksOf([delta({ content: 'x' }), payload, DONE])).rejects.toMatchObject({
+        code: 'MALFORMED_RESPONSE',
+      })
+    }
+  })
+
+  it('fails as malformed on a null choice', async () => {
+    await expect(chunksOf([delta({ content: 'x' }), '{"choices":[null]}', DONE])).rejects.toMatchObject({
+      code: 'MALFORMED_RESPONSE',
+    })
+  })
+
   it('fails as a truncation when the source ends without [DONE]', async () => {
     await expect(chunksOf([delta({ content: 'x' }, 'stop')])).rejects.toMatchObject({
       code: 'STREAM_CLOSED',

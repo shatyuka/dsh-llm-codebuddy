@@ -206,6 +206,12 @@ export async function* translate(
     return block
   }
 
+  /** The one failure a payload with an unusable decoded shape reports. */
+  const malformed = (payload: string): LlmError => new LlmError(
+    `malformed CodeBuddy SSE payload: ${payload.slice(0, 120)}`,
+    'MALFORMED_RESPONSE',
+  )
+
   for await (const payload of payloads) {
     if (payload === DONE) {
       for (const block of order) {
@@ -235,13 +241,13 @@ export async function* translate(
     try {
       chunk = JSON.parse(payload) as WireChunk
     } catch {
-      throw new LlmError(
-        `malformed CodeBuddy SSE payload: ${payload.slice(0, 120)}`,
-        'MALFORMED_RESPONSE',
-      )
+      throw malformed(payload)
     }
+    // Shape errors, not content: the reader below trusts both to carry fields.
+    if (typeof chunk !== 'object' || chunk === null || Array.isArray(chunk)) throw malformed(payload)
 
     for (const choice of chunk.choices ?? []) {
+      if (typeof choice !== 'object' || choice === null) throw malformed(payload)
       const delta = choice.delta
 
       // Reasoning first: thinking models interleave it ahead of visible text.
