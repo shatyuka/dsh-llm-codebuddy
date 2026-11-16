@@ -24,6 +24,7 @@ import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 } from './constants.js'
 import { CodeBuddySession } from './session.js'
+import { CodeBuddyWebFetchProvider, CodeBuddyWebSearchProvider } from './web.js'
 import { MessageLocale } from './locale.js'
 import { SettingsFields } from './settings-schema.js'
 import {
@@ -39,6 +40,14 @@ import type { CreditUnit } from './settings.js'
 export { CodeBuddyAdapter, httpErrorCode } from './adapter.js'
 export type { CodeBuddyAdapterOptions, CodeBuddyConnectionOptions, CodeBuddyTurnReader } from './adapter.js'
 export { CodeBuddyService } from './service.js'
+export {
+  AGENT_TOOL_DEFAULT_RESULTS,
+  AGENT_TOOL_MAX_RESULTS,
+  CODEBUDDY_FETCH_PROVIDER_ID,
+  CODEBUDDY_SEARCH_PROVIDER_ID,
+  CodeBuddyWebFetchProvider,
+  CodeBuddyWebSearchProvider,
+} from './web.js'
 export { CodeBuddyRemote, CODEBUDDY_SERVICE } from './remote.js'
 export type {
   CodeBuddyAuthStatus,
@@ -111,6 +120,10 @@ export const Config = z.object({
   streamIdleTimeoutMs: z.number(),
   /** Provider-owned retry policy; omission selects the harness defaults. */
   retryPolicy: RetryPolicySchema,
+  /** Register the `web_search` backend; omitted means enabled. */
+  webSearch: z.boolean(),
+  /** Register the `web_fetch` backend; omitted means enabled. */
+  webFetch: z.boolean(),
   [SHOW_USAGE_FIELD]: SettingsFields[SHOW_USAGE_FIELD].volatile(),
   [CUSTOM_LIMIT_FIELD]: SettingsFields[CUSTOM_LIMIT_FIELD].volatile(),
   [CUSTOM_LIMIT_UNIT_FIELD]: SettingsFields[CUSTOM_LIMIT_UNIT_FIELD].volatile(),
@@ -126,6 +139,8 @@ export interface Config {
   defaultMaxTokens?: number
   streamIdleTimeoutMs?: number
   retryPolicy?: RetryPolicyConfig
+  webSearch?: boolean
+  webFetch?: boolean
   showUsage?: boolean
   customLimit?: number
   customLimitUnit?: CreditUnit
@@ -235,6 +250,18 @@ export function apply(ctx: Context, config: Config = {}): void {
     timer.unref?.()
     return () => { clearInterval(timer) }
   }, 'dsh-llm-codebuddy: catalog change polling')
+
+  // The web seam is a separate capability that a deployment may not mount at
+  // all, so it is requested here rather than declared as a module-level
+  // requirement: a profile without `dsh-web` still gets the model route.
+  ctx.inject(['web'], (webCtx) => {
+    if (config.webSearch !== false) {
+      webCtx.web.registerSearchProvider(new CodeBuddyWebSearchProvider(session))
+    }
+    if (config.webFetch !== false) {
+      webCtx.web.registerFetchProvider(new CodeBuddyWebFetchProvider(session))
+    }
+  })
 
   const service = new CodeBuddyService(session, messageLocale)
   new CodeBuddyRemote(ctx, service, messageLocale)

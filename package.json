@@ -79,6 +79,7 @@
     "@deepseek-ai/dsh-home-paths": ">=0.2.2-rc.2",
     "@deepseek-ai/dsh-llm": ">=0.2.2-rc.2",
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.2-rc.2",
+    "@deepseek-ai/dsh-web": ">=0.2.2-rc.2",
     "@deepseek-ai/schemastery": "~3.19.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
@@ -103,6 +104,7 @@
     "@deepseek-ai/dsh-home-paths": "0.2.2-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.2",
     "@deepseek-ai/dsh-settings": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-web": "0.2.2-rc.2",
     "@deepseek-ai/schemastery": "~3.19.0",
     "@types/node": "^22.15.0",
     "@types/react": "~18.3.1",

@@ -455,3 +455,41 @@ export interface WireRequest {
   /** Thinking-summary level, sent alongside `reasoning_effort`. */
   reasoning_summary?: string
 }
+
+/** One search hit from `/agenttool/v1/search`. */
+export interface AgentToolSearchItem {
+  title?: string
+  url?: string
+  snippet?: string
+}
+
+/**
+ * The search plane's reply.
+ *
+ * Unlike the control plane this is a flat document, not a `{code, msg, data}`
+ * envelope: a failure is an HTTP status plus `{code, msg}`. Only the fields the
+ * providers read are named; the reply also carries `images` for its image
+ * search, which the web seam has no channel for.
+ */
+export interface AgentToolSearchResponse {
+  results?: AgentToolSearchItem[]
+}
+
+/**
+ * The fetch plane's reply.
+ *
+ * `content` is already Markdown, and `status_code` is the *target page's*
+ * status — the envelope itself answers 200 even for a missing page.
+ */
+export interface AgentToolFetchResponse {
+  url?: string
+  content?: string
+  truncated?: boolean
+  status_code?: number
+}
+
+/** A failure envelope from the search and fetch planes. */
+export interface AgentToolError {
+  code?: number
+  msg?: string
+}

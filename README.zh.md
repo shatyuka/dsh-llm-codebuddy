@@ -16,6 +16,7 @@
 - **图片输入** — 支持视觉的模型可发送图片（不支持视觉的模型可能会被服务器路由到其他模型）。
 - **用量指示器** — 在 Web UI 侧边栏展示个人版与企业版的配额进度条，支持自定义上限与告警阈值。
 - **模型排序** — 可以调整模型菜单的顺序，隐藏不用的模型。
+- **联网搜索** — 提供网页搜索与获取能力。
 
 ## 兼容版本
 
@@ -58,6 +59,18 @@ dsh plugin --profile web exec dsh-codebuddy-login --logout
 ```
 
 登录后，CodeBuddy 的模型会出现在模型选择器中。
+
+## 联网搜索
+
+在 **插件 → 网页搜索与获取** 中把「网页搜索提供方」和「网页获取提供方」分别切换为
+**CodeBuddy Web Search** 与 **CodeBuddy Web Fetch**，或在 profile 中固定：
+
+```yaml
+- id: web
+  config:
+    searchProvider: codebuddy-search
+    fetchProvider: codebuddy-fetch
+```
 
 ## 构建
 

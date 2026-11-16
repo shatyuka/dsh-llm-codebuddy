@@ -16,6 +16,7 @@ Sign in through your browser — **no API key required** — and use CodeBuddy's
 - **Image input** — attach images for vision-capable models (models without vision support may be routed to a different model by the server).
 - **Usage indicator** — a quota bar in the Web UI sidebar for both personal and enterprise plans, with an optional custom cap and a configurable danger threshold.
 - **Model arrangement** — reorder the model menu and hide the models you never use.
+- **Web search** — web search and fetch.
 
 ## Compatibility
 
@@ -58,6 +59,19 @@ dsh plugin --profile web exec dsh-codebuddy-login --logout
 ```
 
 Once signed in, CodeBuddy's models appear in the model picker.
+
+## Web search
+
+Switch **Web search** and **Web fetch** to **CodeBuddy Web Search** /
+**CodeBuddy Web Fetch** under **Plugins → Web search and fetch**, or pin them in
+the profile:
+
+```yaml
+- id: web
+  config:
+    searchProvider: codebuddy-search
+    fetchProvider: codebuddy-fetch
+```
 
 ## Build
 

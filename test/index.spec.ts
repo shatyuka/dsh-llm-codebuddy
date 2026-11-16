@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Config, apply, inject, name, resolveConnectionOptions } from '../src/index.js'
+import { CODEBUDDY_FETCH_PROVIDER_ID, CODEBUDDY_SEARCH_PROVIDER_ID } from '../src/web.js'
 import { saveStorage } from '../src/storage.js'
 import {
   CODEBUDDY_PROVIDER,
@@ -139,16 +140,24 @@ describe('apply', () => {
     const registered: { providers: readonly string[], adapter: unknown }[] = []
     const effects: string[] = []
     const emitted: string[] = []
+    // `ctx.inject` is how the plugin asks for the optional web seam: it starts
+    // a child fiber only once that service exists. Recording the request keeps
+    // the mount testable without a real registry.
+    const injected: { deps: readonly string[], run: () => void }[] = []
     return {
       registered,
       effects,
       emitted,
+      injected,
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
       llm: {
         registerAdapter: (providers: readonly string[], adapter: unknown) => {
           registered.push({ providers, adapter })
           return () => {}
         },
+      },
+      inject: (deps: readonly string[], run: () => void) => {
+        injected.push({ deps, run })
       },
       get: (_name: string): unknown => undefined,
       emit: (event: string) => { emitted.push(event) },
@@ -265,5 +274,40 @@ describe('apply', () => {
       expect(ctx.logger.info).not.toHaveBeenCalled()
       await new Promise(resolve => setTimeout(resolve, 0))
     })
+  })
+
+  /**
+   * Run the deferred web mount against a `ctx.web` double.
+   * @param ctx - the mount's recorded injection requests.
+   * @returns the providers the child context registered.
+   */
+  function mountWeb(ctx: ReturnType<typeof contextOf>) {
+    const registered: unknown[] = []
+    const web = {
+      registerSearchProvider: (provider: unknown) => { registered.push(provider) },
+      registerFetchProvider: (provider: unknown) => { registered.push(provider) },
+    }
+    expect(ctx.injected).toHaveLength(1)
+    ;(ctx.injected[0]!.run as (scope: { web: typeof web }) => void)({ web })
+    return registered
+  }
+
+  it('registers both web backends only once the web seam exists', () => {
+    const ctx = contextOf()
+    apply(ctx as never)
+    // The seam is optional, so nothing is registered at mount time.
+    expect(ctx.injected.map(entry => entry.deps)).toEqual([['web']])
+    expect(mountWeb(ctx).map(provider => (provider as { id: string }).id))
+      .toEqual([CODEBUDDY_SEARCH_PROVIDER_ID, CODEBUDDY_FETCH_PROVIDER_ID])
+  })
+
+  it('leaves a capability alone when its config turns it off', () => {
+    const neither = contextOf()
+    apply(neither as never, { webSearch: false, webFetch: false })
+    expect(mountWeb(neither)).toHaveLength(0)
+
+    const fetchOnly = contextOf()
+    apply(fetchOnly as never, { webSearch: false })
+    expect(mountWeb(fetchOnly)).toHaveLength(1)
   })
 })
