@@ -23,6 +23,7 @@ import {
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
+  BuiltinLlmFailureCode,
   GenerateOptions,
   LlmModelInfo,
   LlmModelReasoningInfo,
@@ -287,12 +288,16 @@ function failureCode(body: WireError): number | undefined {
 
 /**
  * Map an HTTP status onto a stable harness error code.
+ *
+ * The harness types this as its own closed vocabulary plus `HTTP_<status>`, so
+ * the return type is that union rather than `string`: an unclassified status
+ * still has a home, and anything outside it must be a deliberate code.
  * @param status - the non-2xx status.
  * @param detail - every error wording the reply carried, when readable.
  * @param code - the service's own numeric error code, when the body carried one.
  * @returns the normalized code.
  */
-export function httpErrorCode(status: number, detail?: string, code?: number): string {
+export function httpErrorCode(status: number, detail?: string, code?: number): BuiltinLlmFailureCode {
   if (status === 401 || status === 403) return 'AUTH'
   const text = detail ?? ''
   if (code === CODE_NO_QUOTA || code === CODE_NO_TEAM_QUOTA) return QUOTA_EXCEEDED_CODE
